@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "spas-llm-gateway"
+version = "0.1.0"
+description = "Local LLM gateway for СПАС with ChatGPT and Claude subscription adapters"
+requires-python = ">=3.12"
+dependencies = [
+  "cryptography>=44,<50",
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "prompt-toolkit>=3.0.50,<4",
+  "pydantic>=2.10,<3",
+  "PyJWT[crypto]>=2.10,<3",
+  "rich>=13,<15",
+  "uvicorn>=0.34,<1",
+  "websockets>=15,<17",
+]
+
+[project.optional-dependencies]
+claude = ["claude-agent-sdk>=0.2.150,<1"]
+colab = ["google-colab-cli==0.7.4"]
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2", "ruff>=0.9,<1"]
+
+[project.scripts]
+spas-llm = "llm.gateway.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["llm"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.ruff.lint.per-file-ignores]
+# Small native credential snapshots commit synchronously before a profile lock is released.
+"llm/gateway/auth/claude.py" = ["ASYNC240"]
+# Fixed remote cells include embedded Python programs and HTTP URLs.
+"llm/gateway/colab/scripts.py" = ["E501"]

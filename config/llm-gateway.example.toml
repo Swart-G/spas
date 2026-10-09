@@ -1,0 +1,29 @@
+# Copy to llm-gateway.toml. No provider secrets belong in this file.
+[backends.chatgpt]
+provider = "codex_subscription"
+account = "chatgpt-main"
+# Use `spas-llm models chatgpt` after login to choose an account-specific slug.
+model = "gpt-6.1-sol"
+timeout_seconds = 180
+max_concurrency = 2
+
+[backends.claude]
+provider = "claude_subscription"
+account = "claude-main"
+model = "sonnet"
+# Both cli and sdk transports are included in the Compose image.
+transport = "cli"
+timeout_seconds = 180
+max_concurrency = 1
+
+[routes]
+codex-default = ["chatgpt"]
+sonnet-default = ["claude"]
+# An ordered list explicitly authorizes use of a fallback backend:
+# diagnostic-default = ["chatgpt", "claude"]
+
+# Colab connections are created through SPAS TUI → Google Colab.
+# Credentials are stored in the encrypted vault, never in this TOML.
+# Full provisioning: choose Google Colab in TUI, configure Google Desktop OAuth,
+# select an eligible GPU and model, then Start. TUI creates a colab_managed backend
+# and an encrypted deployment profile. No base_url or public tunnel is required.
