@@ -1,11 +1,16 @@
 """Conservative, deterministic command policy. Never executes a command."""
 
 import re
-import shlex
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
-from shared.contracts.safety import CommandRequest, Decision, RiskLevel, SafetyResult
+from shared.contracts.safety import (
+    Decision,
+    ExecutionContextPort,
+    ExecutorSafetyDecision,
+    RiskLevel,
+    SafetyResult,
+)
 
 # These cannot be overridden by an allow rule or deployment configuration.
 _DENIED_EXECUTABLES = frozenset({
@@ -21,8 +26,9 @@ _DENIED_DOCKER_ACTIONS = frozenset({
     "unpause", "update", "cp", "compose", "system", "volume", "network",
     "container", "image", "plugin", "swarm", "stack", "context", "debug",
 })
-# Intentionally reject even quoted shell operators, escapes and expansions.
+# Keep shell operators and expansions outside the supported argv contract.
 _FORBIDDEN = frozenset(";&|<>$`(){}[]*?~#\\")
+_ALLOWED_EXECUTABLES = frozenset({"pwd", "uname", "ls", "cat", "docker"})
 _EXECUTABLE = re.compile(r"[a-zA-Z0-9_-]+\Z")
 _CONTAINER = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*\Z")
 _LS_FLAGS = frozenset({"-l", "-a", "-h", "-la", "-al", "-lh", "-lah", "-alh"})
@@ -69,26 +75,43 @@ class RuleBasedSafetyChecker:
         if not isinstance(self.policy, SafetyPolicy):
             raise TypeError("policy must be a SafetyPolicy")
 
-    def check(self, request: CommandRequest) -> SafetyResult:
-        """Validate one command and return a decision without side effects."""
-        if not isinstance(request, CommandRequest) or not isinstance(request.command, str):
-            return SafetyResult(Decision.DENY, RiskLevel.HIGH, "invalid_request",
-                                "Expected CommandRequest with a string command")
-        command = request.command
-        if len(command) > 4096 or not command.strip():
-            return SafetyResult(Decision.DENY, RiskLevel.HIGH, "invalid_command",
-                                "Command is empty or exceeds 4096 characters")
-        if any(c in _FORBIDDEN or not 32 <= ord(c) <= 126 for c in command):
-            return SafetyResult(Decision.DENY, RiskLevel.HIGH, "shell_syntax",
-                                "Shell syntax, expansions and control characters are unsupported")
+    async def check(
+        self, command: list[str] | str, context: ExecutionContextPort,
+    ) -> dict[str, object]:
+        """Check argv without parsing or execution; legacy strings are denied.
+
+        The str annotation also fits the old Executor port during migration.
+        Only list[str] is a valid input. Context is metadata, not authorization.
+        """
         try:
-            argv = tuple(shlex.split(command, comments=False, posix=True))
-        except ValueError:
+            values = (context.incident_id, context.reason)
+        except AttributeError:
+            return {"decision": "DENY", "reason": "Invalid Executor execution context"}
+        if any(not isinstance(value, str) or not value.strip() or len(value) > 2000
+               for value in values):
+            return {"decision": "DENY", "reason": "Invalid Executor execution context"}
+        result = self._evaluate(command)
+        payload: ExecutorSafetyDecision = {
+            "decision": result.decision.value, "reason": result.reason,
+        }
+        # TypedDict is not a subtype of Executor's mutable dict[str, object].
+        return dict(payload)
+
+    def _evaluate(self, command: list[str] | str) -> SafetyResult:
+        """Internal policy evaluation; the public interface is async check."""
+        if not isinstance(command, list) or not command or len(command) > 4096:
             return SafetyResult(Decision.DENY, RiskLevel.HIGH, "invalid_command",
-                                "Unbalanced command quoting")
-        if not argv or any(not arg for arg in argv):
+                                "Expected a non-empty list[str]; command strings are unsupported")
+        argv = tuple(command)
+        if any(not isinstance(arg, str) or not arg for arg in argv):
             return SafetyResult(Decision.DENY, RiskLevel.HIGH, "invalid_command",
-                                "Empty command or argument")
+                                "Each argv item must be a non-empty string")
+        if sum(len(arg) for arg in argv) + len(argv) - 1 > 4096:
+            return SafetyResult(Decision.DENY, RiskLevel.HIGH, "invalid_command",
+                                "Command arguments exceed 4096 characters including separators")
+        if any(c in _FORBIDDEN or not 32 <= ord(c) <= 126 for arg in argv for c in arg):
+            return SafetyResult(Decision.DENY, RiskLevel.HIGH, "shell_syntax",
+                                "Shell syntax and control characters are unsupported")
 
         def result(decision: Decision, risk: RiskLevel, rule: str, reason: str) -> SafetyResult:
             return SafetyResult(decision, risk, rule, reason, argv)
@@ -101,6 +124,9 @@ class RuleBasedSafetyChecker:
         if not _EXECUTABLE.fullmatch(executable):
             return result(Decision.DENY, RiskLevel.HIGH, "executable_syntax",
                           "Executable paths, assignments and wrappers are unsupported")
+        if executable not in _ALLOWED_EXECUTABLES:
+            return result(Decision.DENY, RiskLevel.HIGH, "executable_allowlist",
+                          "Executable is outside the supported allowlist")
         # Do not guess the subcommand by skipping global flags: some consume values
         # or change the Docker endpoint/configuration. Only explicit forms are supported.
         if executable == "docker" and args and args[0].startswith("-"):
@@ -149,5 +175,5 @@ class RuleBasedSafetyChecker:
             # prohibition into an approval request (e.g. by hiding an exec action).
             return result(Decision.DENY, RiskLevel.HIGH, "docker_unsupported",
                           "Docker command or arguments are outside the supported allowlist")
-        return result(Decision.REQUIRE_APPROVAL, RiskLevel.HIGH, "unknown_command",
-                      "No allow rule matches this exact command and its arguments")
+        return result(Decision.DENY, RiskLevel.HIGH, "unsupported_arguments",
+                      "Arguments are outside the supported allowlist")

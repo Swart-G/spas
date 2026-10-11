@@ -45,16 +45,18 @@ Resolved / Replan / Re-diagnosis
 
 ## Rule-based Safety Checker
 
-Правила безопасности и асинхронный адаптер для Executor MCP: Python 3.10+,
-без внешних зависимостей у checker. Глобальные флаги и неподдерживаемые формы
-Docker запрещены, чтобы они не обходили жёсткие запреты.
-[Правила, контракт и интеграция с Executor MCP](executer/safety_checker/SAFETY_CHECKER.md).
+Асинхронный `RuleBasedSafetyChecker.check(argv, context)` принимает `list[str]`
+без повторного разбора команды. Неизвестные программы и неподдерживаемые
+аргументы Docker запрещены. Ответ: `decision` и `reason`.
+[Правила и подключение](executer/safety_checker/SAFETY_CHECKER.md).
 
-Запуск тестов из корня репозитория:
+Тесты из корня репозитория (Python 3.10+, без внешних зависимостей):
 
 ```sh
 python3 -m unittest discover -s tests -v
 ```
 
-При отсутствии кода Executor его интеграционные тесты пропускаются. Для их запуска
-нужны код `workeragent/executermcp` и его зависимости; подробности — в инструкции выше.
+Для проверки с отдельным checkout Executor установите его зависимости и mypy,
+затем запустите `python3 scripts/check_executor_integration.py /path/to/executor`.
+Скрипт проверяет оба компонента в одном временном каталоге, не меняя исходники.
+Переход Runner и входной модели Executor на argv выполняется на его стороне.

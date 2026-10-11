@@ -1,4 +1,4 @@
-"""Provisional safety contracts shared by Safety Checker and Executor MCP."""
+"""Safety policy metadata and the async argv port for Executor MCP."""
 
 from dataclasses import dataclass
 from enum import Enum
@@ -16,11 +16,6 @@ class RiskLevel(str, Enum):
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
     CRITICAL = "CRITICAL"
-
-
-@dataclass(frozen=True)
-class CommandRequest:
-    command: str
 
 
 @dataclass(frozen=True)
@@ -50,7 +45,7 @@ class ExecutionContextPort(Protocol):
 
 
 class ExecutorSafetyDecision(TypedDict):
-    """Wire response accepted by Executor's SafetyDecision.model_validate()."""
+    """Internal field schema; the Executor port returns a plain dict[str, object]."""
 
     decision: Literal["ALLOW", "DENY", "REQUIRE_APPROVAL"]
     reason: str
@@ -58,5 +53,5 @@ class ExecutorSafetyDecision(TypedDict):
 
 class ExecutorSafetyCheckerPort(Protocol):
     async def check(
-        self, command: str, context: ExecutionContextPort,
-    ) -> ExecutorSafetyDecision: ...
+        self, command: list[str], context: ExecutionContextPort,
+    ) -> dict[str, object]: ...
