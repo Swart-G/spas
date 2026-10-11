@@ -52,10 +52,36 @@ class SafetyCheckerTests(unittest.TestCase):
     def test_unknown_commands_and_argument_bypasses_never_allow(self):
         self.check_cases([
             "curl https://example.com", "unknown",
-            "pwd --help", "uname /etc/shadow", "docker inspect backend",
-            "docker -H tcp://remote ps", "docker --config /tmp/evil ps",
-            "docker ps --format evil", "git status",
+            "pwd --help", "uname /etc/shadow", "git status",
         ], Decision.REQUIRE_APPROVAL)
+
+    def test_docker_global_options_cannot_weaken_a_denial(self):
+        for prefix in ("--debug", "-D", "--debug=true", "--debug=false", "-D=true",
+                       "--context production", "-cproduction", "--host=tcp://remote",
+                       "-H tcp://remote", "--config /tmp/evil", "--log-level debug",
+                       "--tls", "--tlsverify", "--unknown-option", "--"):
+            for action in ("exec backend id", "run alpine id", "rm backend", "ps"):
+                command = f"docker {prefix} {action}"
+                with self.subTest(command=command):
+                    result = self.checker.check(CommandRequest(command))
+                    self.assertEqual(result.decision, Decision.DENY)
+                    self.assertEqual(result.rule_id, "docker_global_options")
+                    self.assertFalse(result.allowed)
+
+    def test_docker_options_after_subcommand_are_denied(self):
+        self.check_cases([
+            "docker ps --debug", "docker ps -D", "docker ps --context production",
+            "docker ps --config /tmp/evil", "docker ps --format evil",
+            "docker exec --debug backend id", "docker exec backend id --debug",
+            "docker logs --debug --tail 10 -- backend",
+            "docker logs --tail 10 -- backend --debug", "docker restart --debug -- backend",
+        ], Decision.DENY)
+
+    def test_unknown_docker_actions_and_plugins_are_denied(self):
+        self.check_cases([
+            "docker", "docker debug --command id backend", "docker inspect backend",
+            "docker buildx build .", "docker custom-plugin backend", "docker help exec",
+        ], Decision.DENY)
 
     def test_file_scope_and_unsupported_flags(self):
         self.check_cases([

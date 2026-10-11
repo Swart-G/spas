@@ -45,7 +45,9 @@ Resolved / Replan / Re-diagnosis
 
 ## Rule-based Safety Checker
 
-Минимальная реализация правил безопасности: Python 3.10+, без внешних зависимостей.
+Правила безопасности и асинхронный адаптер для Executor MCP: Python 3.10+,
+без внешних зависимостей у checker. Глобальные флаги и неподдерживаемые формы
+Docker запрещены, чтобы они не обходили жёсткие запреты.
 [Правила, контракт и интеграция с Executor MCP](executer/safety_checker/SAFETY_CHECKER.md).
 
 Запуск тестов из корня репозитория:
@@ -53,3 +55,6 @@ Resolved / Replan / Re-diagnosis
 ```sh
 python3 -m unittest discover -s tests -v
 ```
+
+При отсутствии кода Executor его интеграционные тесты пропускаются. Для их запуска
+нужны код `workeragent/executermcp` и его зависимости; подробности — в инструкции выше.

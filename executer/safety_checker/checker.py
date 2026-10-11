@@ -19,7 +19,7 @@ _DENIED_EXECUTABLES = frozenset({
 _DENIED_DOCKER_ACTIONS = frozenset({
     "rm", "rmi", "prune", "exec", "run", "build", "stop", "kill", "pause",
     "unpause", "update", "cp", "compose", "system", "volume", "network",
-    "container", "image", "plugin", "swarm", "stack", "context",
+    "container", "image", "plugin", "swarm", "stack", "context", "debug",
 })
 # Intentionally reject even quoted shell operators, escapes and expansions.
 _FORBIDDEN = frozenset(";&|<>$`(){}[]*?~#\\")
@@ -101,6 +101,11 @@ class RuleBasedSafetyChecker:
         if not _EXECUTABLE.fullmatch(executable):
             return result(Decision.DENY, RiskLevel.HIGH, "executable_syntax",
                           "Executable paths, assignments and wrappers are unsupported")
+        # Do not guess the subcommand by skipping global flags: some consume values
+        # or change the Docker endpoint/configuration. Only explicit forms are supported.
+        if executable == "docker" and args and args[0].startswith("-"):
+            return result(Decision.DENY, RiskLevel.HIGH, "docker_global_options",
+                          "Docker global options are unsupported")
         if executable == "docker" and args and args[0] in _DENIED_DOCKER_ACTIONS:
             return result(Decision.DENY, RiskLevel.CRITICAL, "docker_denylist",
                           "Docker action is explicitly forbidden")
@@ -140,5 +145,9 @@ class RuleBasedSafetyChecker:
                                   "Restart of an approved container requires human approval")
                 return result(Decision.DENY, RiskLevel.HIGH, "docker_scope",
                               "Unsupported arguments or container outside the approved scope")
+            # Docker also dispatches plugins. Unknown forms must not turn a hard
+            # prohibition into an approval request (e.g. by hiding an exec action).
+            return result(Decision.DENY, RiskLevel.HIGH, "docker_unsupported",
+                          "Docker command or arguments are outside the supported allowlist")
         return result(Decision.REQUIRE_APPROVAL, RiskLevel.HIGH, "unknown_command",
                       "No allow rule matches this exact command and its arguments")
