@@ -1,0 +1,22 @@
+name: safety-analyzer
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: executer/safety_checker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.23"
+          python-version: "3.12"
+      - run: uv sync --frozen --group integration
+      - run: uv run --frozen --group integration ruff check src tests scripts
+      - run: uv run --frozen --group integration ruff format --check src tests scripts
+      - run: uv run --frozen --group integration pytest -q -m 'not live'
+      - run: uv run --frozen --group integration python scripts/dev.py --smoke
+      - run: docker build -t safety-analyzer:ci .

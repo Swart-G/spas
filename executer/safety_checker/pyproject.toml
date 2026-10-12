@@ -1,0 +1,39 @@
+[project]
+name = "safety-analyzer"
+version = "0.1.0"
+description = "Fail-closed safety classifier with an LLM Gateway adapter"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "pydantic-settings>=2.7,<3",
+  "uvicorn>=0.34,<1",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.3,<9", "pytest-asyncio>=0.25,<1", "ruff>=0.9,<1"]
+integration = [
+  "spas-llm-gateway @ git+https://github.com/Swart-G/spas.git@2968247a5bed416054a66bd08ef18589f77230ed",
+]
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/safety_analyzer"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+  "live: requires a configured real LLM Gateway and model",
+  "gateway_contract: exercises the pinned SPAS Gateway with a test provider",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]

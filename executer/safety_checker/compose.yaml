@@ -1,0 +1,24 @@
+services:
+  gateway-stub:
+    profiles: [stub]
+    build: .
+    image: safety-analyzer:dev
+    command: [uvicorn, "safety_analyzer.stub_gateway:create_stub_app", --factory, --host, "0.0.0.0", --port, "8008", --no-access-log]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8008/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+  analyzer:
+    profiles: [stub]
+    build: .
+    image: safety-analyzer:dev
+    environment:
+      SAFETY_GATEWAY_BASE_URL: http://gateway-stub:8008/v1
+      SAFETY_GATEWAY_API_KEY: local-stub-only
+      SAFETY_MODEL: stub
+      SAFETY_OUTPUT_MODE: label
+    ports: ["127.0.0.1:${SAFETY_DEV_PORT:-8000}:8000"]
+    depends_on:
+      gateway-stub:
+        condition: service_healthy
