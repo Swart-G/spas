@@ -1,10 +1,10 @@
 from datetime import datetime
 from enum import Enum
-from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from shared.contracts.snapshots import SnapshotData
 from shared.time import utc_now
 
 
@@ -25,7 +25,7 @@ class AgentMessage(BaseModel):
     sender: RoleEnum = RoleEnum.ORCHESTRATOR
     receiver: RoleEnum
     task_description: str
-    payload: dict[str, Any] = Field(default_factory=dict)
+    payload: SnapshotData = Field(default_factory=dict, validate_default=True)
     timestamp: datetime = Field(default_factory=utc_now)
 
 
@@ -40,6 +40,6 @@ class AgentResult(BaseModel):
     sender: RoleEnum
     receiver: RoleEnum = RoleEnum.ORCHESTRATOR
     is_success: bool
-    output_data: dict[str, Any] = Field(default_factory=dict)
+    output_data: SnapshotData = Field(default_factory=dict, validate_default=True)
     error_message: str | None = None
     timestamp: datetime = Field(default_factory=utc_now)

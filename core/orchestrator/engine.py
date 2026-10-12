@@ -54,17 +54,41 @@ class Orchestrator:
                 payload={"text": incident.description},
             )
 
+            caller = asyncio.current_task()
+            cancel_requests = caller.cancelling() if caller is not None else 0
+
+            def caller_was_cancelled() -> bool:
+                return caller is not None and caller.cancelling() > cancel_requests
+
             try:
                 agent = self.agents[RoleEnum.TRIAGE]
-                result = await asyncio.wait_for(
-                    agent.process(message),
-                    timeout=self.agent_timeout,
-                )
+                deadline = asyncio.timeout(self.agent_timeout)
+                async with deadline:
+                    # Isolate the caller's cancellation counter from the agent.
+                    result = await asyncio.create_task(agent.process(message))
 
-                self._validate_result(message, result)
+                if caller_was_cancelled():
+                    raise asyncio.CancelledError
+                if deadline.expired():
+                    # An agent can suppress timeout cancellation as well.
+                    raise TimeoutError("Agent processing timed out")
+
+                result = self._validate_result(message, result)
                 self._handle_agent_result(incident, result)
 
+            except asyncio.CancelledError:
+                # The step has no committed result; release the lock with a
+                # retryable state, but preserve cancellation for the caller.
+                incident.update_status(IncidentStatus.NEW)
+                raise
+
             except Exception as exc:
+                if caller_was_cancelled():
+                    # Cleanup errors must not turn an interrupted step into a
+                    # permanent failure or swallow the caller's cancellation.
+                    incident.update_status(IncidentStatus.NEW)
+                    raise asyncio.CancelledError from exc
+                # Agent implementations may raise arbitrary exceptions.
                 # Do not leave the incident in an intermediate state.
                 incident.update_status(IncidentStatus.FAILED)
                 print(
@@ -75,7 +99,14 @@ class Orchestrator:
     @staticmethod
     def _validate_result(
         message: AgentMessage, result: AgentResult
-    ) -> None:
+    ) -> AgentResult:
+        if not isinstance(result, AgentResult):
+            raise TypeError("Agent result must be an AgentResult")
+
+        # Revalidate a detached copy: model_copy(update=...) and model_construct
+        # can bypass Pydantic field validation even on an otherwise frozen model.
+        result = AgentResult.model_validate(result.model_dump())
+
         if result.message_id != message.message_id:
             raise ValueError("Agent result message_id mismatch")
 
@@ -88,6 +119,8 @@ class Orchestrator:
         if result.receiver != RoleEnum.ORCHESTRATOR:
             raise ValueError("Unexpected result receiver")
 
+        return result
+
     @staticmethod
     def _handle_agent_result(
         incident: Incident, result: AgentResult
@@ -99,7 +132,7 @@ class Orchestrator:
             return
 
         if result.sender == RoleEnum.TRIAGE:
-            incident.metrics_log.update(result.output_data)
+            incident.metrics_log = {**incident.metrics_log, **result.output_data}
 
             # Successful triage does not mean that the incident is resolved.
             incident.updated_at = utc_now()

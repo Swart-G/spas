@@ -36,7 +36,6 @@ def test_valid_status_transition():
         (IncidentStatus.NEW, IncidentStatus.REMEDIATING),
         (IncidentStatus.RESOLVED, IncidentStatus.NEW),
         (IncidentStatus.FAILED, IncidentStatus.INVESTIGATING),
-        (IncidentStatus.INVESTIGATING, IncidentStatus.NEW),
     ],
 )
 def test_invalid_status_transitions_are_rejected(initial, target):
@@ -50,6 +49,17 @@ def test_invalid_status_transitions_are_rejected(initial, target):
         incident.update_status(target)
 
     assert incident.status == initial
+
+
+def test_interrupted_investigation_can_return_to_new():
+    incident = Incident(title="DB timeout", description="Database timeout")
+    incident.update_status(IncidentStatus.INVESTIGATING)
+
+    incident.update_status(IncidentStatus.NEW)
+
+    assert incident.status == IncidentStatus.NEW
+    incident.update_status(IncidentStatus.INVESTIGATING)
+    assert incident.status == IncidentStatus.INVESTIGATING
 
 
 def test_same_status_transition_is_a_noop():
