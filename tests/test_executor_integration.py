@@ -3,7 +3,7 @@
 Executor at 79f4fd0 still accepts strings. They must fail closed until its argv
 migration lands. No command or shell process is started in these tests.
 """
-
+from mcp.server.mcpserver.exceptions import ToolError
 import importlib.util
 import unittest
 from pathlib import Path
@@ -57,11 +57,10 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         for command in ("pwd", "docker ps", "docker --debug rm backend",
                         "docker -D exec backend id", "docker restart -- backend", "pwd && uname"):
             with self.subTest(command=command):
-                with patch.object(Server, "run_shell", AsyncMock()) as runner:
-                    result = await self.call(server, command)
+                with patch.object(Server, "run_command", AsyncMock()) as runner:
+                    with self.assertRaises(ToolError):
+                        await self.call(server, command)
                 runner.assert_not_awaited()
-                self.assertEqual(result.structured_content["status"], "denied")
-                self.assertTrue(result.structured_content["safety_checked"])
 
     async def test_checker_failure_does_not_reach_runner(self):
         class BrokenChecker(RuleBasedSafetyChecker):
@@ -69,16 +68,16 @@ class ExecutorIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("Checker unavailable")
 
         server = Server.create_server(checker=BrokenChecker())
-        with patch.object(Server, "run_shell", AsyncMock()) as runner:
-            result = await self.call(server, "pwd")
+        with patch.object(Server, "run_command", AsyncMock()) as runner:
+            result = await self.call(server, ["pwd"])
         runner.assert_not_awaited()
         self.assertEqual(result.structured_content["status"], "error")
         self.assertFalse(result.structured_content["safety_checked"])
 
     async def test_missing_checker_does_not_reach_runner(self):
         server = Server.create_server()
-        with patch.object(Server, "run_shell", AsyncMock()) as runner:
-            result = await self.call(server, "pwd")
+        with patch.object(Server, "run_command", AsyncMock()) as runner:
+            result = await self.call(server, ["pwd"])
         runner.assert_not_awaited()
         self.assertEqual(result.structured_content["status"], "error")
 

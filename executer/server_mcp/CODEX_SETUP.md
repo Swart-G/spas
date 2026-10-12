@@ -13,6 +13,7 @@ docker build -t spas-executor:local -f executer/server_mcp/Dockerfile .
 После изменения Python-кода образ нужно пересобрать. Исходники не подключаются
 в контейнер с хоста. Файл зависимостей — `requirements.txt` в корне проекта.
 
+
 ## 2. Проверить руками
 
 ```sh
