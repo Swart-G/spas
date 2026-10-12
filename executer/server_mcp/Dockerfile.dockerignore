@@ -1,0 +1,15 @@
+# Контекст сборки содержит только зависимости и код Executor.
+**
+!requirements.txt
+!executer/
+!executer/__init__.py
+!executer/server_mcp/
+!executer/server_mcp/*.py
+!executer/server_mcp/Dockerfile
+!executer/server_mcp/Dockerfile.dockerignore
+
+!executer/safety_checker/
+!executer/safety_checker/*.py
+!shared/
+!shared/contracts/
+!shared/contracts/safety.py

@@ -9,3 +9,5 @@ build/
 .env
 .spas/
 config/llm-gateway.toml
+
+/logs/
