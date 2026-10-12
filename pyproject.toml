@@ -22,7 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 claude = ["claude-agent-sdk>=0.2.150,<1"]
 colab = ["google-colab-cli==0.7.4"]
-dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2", "ruff>=0.9,<1"]
+dev = ["mcp==2.2.0", "pytest>=8,<10", "pytest-asyncio>=0.25,<2", "ruff>=0.9,<1"]
 
 [project.scripts]
 spas-llm = "llm.gateway.cli:main"
