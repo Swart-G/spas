@@ -23,7 +23,7 @@ from .core.models import ChatRequest
 from .core.router import Router
 from .main import GatewayKeys, make_registry
 
-console = Console(highlight=False)
+console = Console(highlight=False, style="bright_white")
 
 
 def initial_config() -> GatewayConfig:
@@ -90,7 +90,16 @@ async def perform(args, config_path: Path, state_dir: Path) -> None:
     async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
         auth = AuthManager(CredentialStore(state_dir), client)
         profiles = ClaudeProfiles(auth)
-        if args.command == "accounts":
+        if args.command == "colab-terminal":
+            from .colab.manager import ColabManager
+            from .colab.terminal import open_terminal
+
+            config = GatewayConfig.load(config_path)
+            backend = config.backends.get(args.backend)
+            if backend is None or backend.provider != "colab_managed":
+                raise GatewayError("Выберите управляемое подключение Colab.")
+            await open_terminal(ColabManager(auth.store, client), backend.account)
+        elif args.command == "accounts":
             print_accounts(auth)
         elif args.command == "login":
             if args.provider == "chatgpt":
@@ -119,7 +128,7 @@ async def perform(args, config_path: Path, state_dir: Path) -> None:
         elif args.command == "api-key":
             await auth.save_api_key(args.account, getpass.getpass("OpenAI API key: "))
             console.print("API-ключ сохранён в зашифрованном виде.")
-        elif args.command in {"models", "probe", "status"}:
+        elif args.command in {"models", "probe", "status", "decide"}:
             config = GatewayConfig.load(config_path)
             registry = make_registry(config, auth, client)
             if args.command in {"models", "status"}:
@@ -141,14 +150,39 @@ async def perform(args, config_path: Path, state_dir: Path) -> None:
             request = ChatRequest.model_validate(
                 {
                     "model": alias,
-                    "messages": [{"role": "user", "content": args.prompt}],
-                    "stream": args.stream,
+                    "messages": [{"role": "user", "content": getattr(args, "prompt", "probe")}],
+                    "stream": getattr(args, "stream", False),
                 }
             )
             audit = RequestLog(state_dir)
             try:
                 router = Router(registry, auth, audit)
-                if args.stream:
+                if args.command == "decide" or registry.capabilities(alias).decisions:
+                    from .core.decisions import DecisionRequest
+
+                    payload = (
+                        args.payload
+                        if getattr(args, "payload", None) is not None
+                        else json.loads(args.input.read_text())
+                        if args.command == "decide"
+                        else {
+                            "context": args.prompt,
+                            "schema": {
+                                "incident": {
+                                    "type": "boolean",
+                                    "description": "Does the text describe a failure?",
+                                }
+                            },
+                        }
+                    )
+                    if not isinstance(payload, dict):
+                        raise GatewayError("JSON решения должен быть объектом.", status=400)
+                    payload["model"] = alias
+                    result = await router.decide(
+                        DecisionRequest.model_validate(payload), "cli-decision"
+                    )
+                    console.print(json.dumps(result, ensure_ascii=False, indent=2), markup=False)
+                elif args.stream:
                     async with aclosing(router.stream(request, "cli-probe")) as events:
                         async for event in events:
                             if event.kind == "delta":
@@ -170,6 +204,8 @@ def parser() -> argparse.ArgumentParser:
     commands = root.add_subparsers(dest="command", required=True)
     commands.add_parser("init", help="Create local configuration and gateway keys")
     commands.add_parser("accounts", help="List accounts without revealing credentials")
+    terminal = commands.add_parser("colab-terminal", help="Open an interactive Colab terminal")
+    terminal.add_argument("backend")
     login = commands.add_parser("login", help="Authorize a subscription account")
     login.add_argument("provider", choices=["chatgpt", "claude"])
     login.add_argument("account")
@@ -194,6 +230,9 @@ def parser() -> argparse.ArgumentParser:
     probe.add_argument("backend", help="Backend name or logical model alias")
     probe.add_argument("--prompt", default="Ответь ровно одним словом: СПАС")
     probe.add_argument("--stream", action="store_true")
+    decide = commands.add_parser("decide", help="Score bounded enum/boolean fields")
+    decide.add_argument("backend", help="Backend name or logical model alias")
+    decide.add_argument("--input", type=Path, required=True, help="JSON with context and schema")
     route = commands.add_parser("route", help="Set a model route and explicit fallbacks")
     route.add_argument("alias")
     route.add_argument("backends", nargs="+")
@@ -259,7 +298,7 @@ def main() -> None:
     except GatewayError as error:
         console.print(f"{error.code}: {error.message}", markup=False, style="red")
         sys.exit(1)
-    except (OSError, ValidationError) as error:
+    except (OSError, ValidationError, json.JSONDecodeError) as error:
         console.print(f"Ошибка конфигурации: {type(error).__name__}. Проверьте путь и TOML.")
         sys.exit(1)
     except KeyboardInterrupt:

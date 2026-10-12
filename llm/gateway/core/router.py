@@ -5,6 +5,7 @@ from contextlib import aclosing
 
 from ..auth.manager import AuthManager
 from .audit import RequestLog
+from .decisions import validate_result
 from .errors import GatewayError
 from .models import ChatRequest, Generation, StreamEvent
 from .registry import Registry
@@ -26,6 +27,66 @@ class Router:
         if terminal is None:
             raise GatewayError("Результат генерации не подтверждён.")
         return Generation("".join(pieces), terminal.usage, terminal.finish_reason)
+
+    async def decide(self, request, request_id):
+        if not self.registry.capabilities(request.model).decisions:
+            raise GatewayError(
+                "Маршрут не поддерживает типизированные решения.",
+                code="unsupported_parameter",
+                status=400,
+            )
+        backends = self.registry.resolve(request.model)
+        for index, backend in enumerate(backends):
+            started = time.monotonic()
+            recorded = False
+            try:
+                self.auth.check_cooldown(backend.config.account)
+                try:
+                    async with asyncio.timeout(backend.config.timeout_seconds):
+                        async with backend.semaphore:
+                            self.auth.check_cooldown(backend.config.account)
+                            try:
+                                result = validate_result(
+                                    await backend.provider.decide(request), request
+                                )
+                            except GatewayError as error:
+                                await self.auth.note_result(backend.config.account, error)
+                                recorded = True
+                                raise
+                            await self.auth.note_result(backend.config.account)
+                            recorded = True
+                except TimeoutError as error:
+                    raise GatewayError(
+                        "Истекло время ожидания backend.", code="provider_timeout", status=504
+                    ) from error
+                self.audit.record(
+                    request_id=request_id,
+                    model=request.model,
+                    backend=backend.name,
+                    status="completed",
+                    latency_ms=round((time.monotonic() - started) * 1000),
+                )
+                return result
+            except GatewayError as error:
+                if not recorded:
+                    await self.auth.note_result(backend.config.account, error)
+                self.audit.record(
+                    request_id=request_id,
+                    model=request.model,
+                    backend=backend.name,
+                    status=error.code,
+                    latency_ms=round((time.monotonic() - started) * 1000),
+                )
+                if error.code not in self.registry.config.fallback_on or index + 1 == len(backends):
+                    raise
+            except asyncio.CancelledError:
+                self.audit.record(
+                    request_id=request_id,
+                    model=request.model,
+                    backend=backend.name,
+                    status="cancelled",
+                )
+                raise
 
     async def stream(self, request: ChatRequest, request_id: str) -> AsyncIterator[StreamEvent]:
         self.registry.capabilities(request.model).validate(request)

@@ -15,7 +15,9 @@ from ..core.errors import GatewayError
 from ..main import GatewayKeys
 from ..terminal import Back, input_text_async
 from ..tui import ask, confirm, execute, menu, number, page_header
+from .lifetime import time_label
 from .manager import ColabManager, DeploymentSettings
+from .progress import StartupDisplay
 
 
 def integer(label, *, default):
@@ -55,10 +57,6 @@ STAGES = {
     "VERIFYING": "Проверяется реальная генерация",
     "VERIFIED": "Модель проверена и готова для агентов",
 }
-
-
-def announce(stage):
-    console.print(STAGES.get(stage, stage), markup=False)
 
 
 async def apply_gateway(state_dir: Path):
@@ -246,6 +244,11 @@ def configure_deployment(config, config_path, state_dir, *, name=None):
             default=old.model_repo if old else "Qwen/Qwen2.5-1.5B-Instruct",
         ),
         revision=ask("Ревизия модели", default=old.revision if old else "main"),
+        model_kind=ask(
+            "Тип модели (auto распознаёт Bespoke-Nimble)",
+            choices=["auto", "chat", "nimble"],
+            default=old.model_kind if old else "auto",
+        ),
         precision=ask(
             "Точность весов",
             choices=["auto", "float16", "bfloat16", "float32"],
@@ -264,6 +267,20 @@ def configure_deployment(config, config_path, state_dir, *, name=None):
         startup_timeout=integer(
             "Лимит загрузки модели, секунд", default=old.startup_timeout if old else 600
         ),
+        download_stall_timeout=integer(
+            "Повторить скачивание после застоя, секунд",
+            default=old.download_stall_timeout if old else 180,
+        ),
+        download_max_attempts=integer(
+            "Максимум попыток скачивания",
+            default=old.download_max_attempts if old else 3,
+        ),
+        download_retry_backoff=integer(
+            "Начальная пауза между попытками, секунд",
+            default=old.download_retry_backoff if old else 5,
+        ),
+        auto_create_runtime=old.auto_create_runtime if old else False,
+        vm_lifetime_hours=old.vm_lifetime_hours if old else 12,
     )
     hf_token = ask("Hugging Face token (Enter — сохранить, - удалить)", password=True)
     hf_token = None if not hf_token else ("" if hf_token == "-" else hf_token)
@@ -286,6 +303,7 @@ def configure_deployment(config, config_path, state_dir, *, name=None):
         provider="colab_managed",
         account=account,
         model=settings.model_repo,
+        model_kind=settings.model_kind,
         timeout_seconds=timeout,
         max_concurrency=current.max_concurrency if current else 1,
     ).model_dump()
@@ -298,11 +316,11 @@ def configure_deployment(config, config_path, state_dir, *, name=None):
     )
 
 
-async def deployment_action(state_dir, account, operation):
+async def deployment_action(state_dir, account, operation, *, progress=None):
     async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
         manager = ColabManager(CredentialStore(state_dir), client)
         if operation == "start":
-            await manager.start(account, announce)
+            await manager.start(account, progress=progress or (lambda event: None))
         elif operation == "stop":
             await manager.stop(account)
         elif operation == "delete":
@@ -312,6 +330,10 @@ async def deployment_action(state_dir, account, operation):
                 json.dumps(await manager.status(account), ensure_ascii=False, indent=2),
                 markup=False,
             )
+        elif operation == "terminal":
+            from .terminal import open_terminal
+
+            await open_terminal(manager, account)
 
 
 def managed_backends(config):
@@ -337,7 +359,15 @@ STAGE_LABELS = {
 def show_deployments(config_path, state_dir, *, name=None):
     store = CredentialStore(state_dir)
     config = GatewayConfig.load(config_path)
-    table = Table("Подключение", "Модель", "GPU", "Состояние", "Маршруты")
+    table = Table(
+        "Подключение",
+        "Модель",
+        "GPU",
+        "Состояние",
+        "VM осталось (оценка)",
+        "Автосоздание",
+        "Маршруты",
+    )
     for key, backend in managed_backends(config).items():
         if name is not None and key != name:
             continue
@@ -349,6 +379,10 @@ def show_deployments(config_path, state_dir, *, name=None):
             backend.model,
             settings.get("accelerator", "—"),
             STAGE_LABELS.get(stage, stage or "Не настроен"),
+            time_label(record),
+            ("Пауза" if record.get("auto_creation_paused") else "Включено")
+            if settings.get("auto_create_runtime")
+            else "Выключено",
             ", ".join(alias for alias, backends in config.routes.items() if key in backends) or "—",
         )
     console.print(table)
@@ -386,12 +420,24 @@ def manage_connection(name, config_path, state_dir):
         )
         return [
             ("configure", "Модель, GPU и параметры подключения"),
+            ("runtime_policy", "Время жизни VM и автосоздание"),
             ("start", "Полный запуск / восстановление — runtime, скачивание и сервер"),
             ("status", "Состояние runtime и модели"),
             ("models", "Каталог загруженных моделей"),
-            ("probe", "Проверочный запрос, обычный или stream"),
+            (
+                "probe",
+                "Проверочное решение"
+                if backend.decision_model
+                else "Проверочный запрос, обычный или stream",
+            ),
+            *(
+                [("decide", "Типизированное решение — контекст и схема")]
+                if backend.decision_model
+                else []
+            ),
             *(
                 [
+                    ("terminal", "Открыть терминал Colab"),
                     ("stop", "Остановить модель, сохранить runtime"),
                     ("delete", "Удалить runtime и освободить GPU"),
                 ]
@@ -421,6 +467,36 @@ def full_colab_action(config, config_path, state_dir, operation, *, name=None):
         return
     if operation in {"create", "configure"}:
         configure_deployment(config, config_path, state_dir, name=name)
+        return
+    if operation == "runtime_policy":
+        backend = config.backends[name]
+        record = CredentialStore(state_dir).get(account_key(backend.account)) or {}
+        settings = record.get("settings", {})
+        console.print(
+            "При включении Gateway создаёт замену исчезнувшей VM и запускает модель. "
+            "Ручная остановка/удаление приостанавливает автоматику. "
+            "Время жизни — оценка, VM может завершиться раньше."
+        )
+        enabled = (
+            ask(
+                "Автосоздание VM",
+                choices=["off", "on"],
+                default="on" if settings.get("auto_create_runtime") else "off",
+            )
+            == "on"
+        )
+        hours = integer(
+            "Оценочное время жизни VM, часов", default=settings.get("vm_lifetime_hours", 12)
+        )
+
+        async def save_policy():
+            async with httpx.AsyncClient() as client:
+                await ColabManager(CredentialStore(state_dir), client).set_runtime_policy(
+                    backend.account, enabled=enabled, lifetime_hours=hours
+                )
+
+        asyncio.run(save_policy())
+        console.print("Настройки VM сохранены; Gateway применит автоматику без перезапуска.")
         return
     if operation == "apply":
         asyncio.run(apply_gateway(state_dir))
@@ -459,9 +535,13 @@ def full_colab_action(config, config_path, state_dir, operation, *, name=None):
         "Удалить runtime вместе с моделью и файлами?", default=False
     ):
         return
-    if operation in {"start", "stop", "delete", "status"}:
-        asyncio.run(deployment_action(state_dir, backends[name].account, operation))
-        if operation == "start":
+    if operation == "start":
+        backend = backends[name]
+        with StartupDisplay(console, name, backend.model, nimble=backend.decision_model) as display:
+            asyncio.run(
+                deployment_action(state_dir, backend.account, operation, progress=display.update)
+            )
+            display.update({"step": "route", "status": "running"})
             try:
                 asyncio.run(apply_gateway(state_dir))
             except GatewayError as error:
@@ -469,7 +549,10 @@ def full_colab_action(config, config_path, state_dir, operation, *, name=None):
                     "Модель запущена. Настройки Gateway пока не применены: " + error.message,
                     code="gateway_reload_pending",
                 ) from error
-            console.print("Маршрут модели применён в Gateway.")
+            display.update({"step": "route", "status": "done"})
+        console.print("Маршрут модели применён в Gateway.")
+    elif operation in {"stop", "delete", "status", "terminal"}:
+        asyncio.run(deployment_action(state_dir, backends[name].account, operation))
     elif operation == "models":
         execute(config_path, state_dir, "models", backend=name)
     elif operation == "probe":
@@ -478,6 +561,28 @@ def full_colab_action(config, config_path, state_dir, operation, *, name=None):
             state_dir,
             "probe",
             backend=name,
-            stream=confirm("Потоковый ответ?", default=False),
-            prompt=ask("Проверочный запрос", default="Ответь ровно одним словом: СПАС"),
+            stream=False
+            if backends[name].decision_model
+            else confirm("Потоковый ответ?", default=False),
+            prompt=ask(
+                "Контекст" if backends[name].decision_model else "Проверочный запрос",
+                default="The service is unavailable."
+                if backends[name].decision_model
+                else "Ответь ровно одним словом: СПАС",
+            ),
+        )
+    elif operation == "decide":
+        context = ask("Контекст для оценки", default="The service is unavailable.")
+        schema = json.loads(
+            ask(
+                "Схема полей JSON (enum/boolean)",
+                default='{"incident":{"type":"boolean","description":"Is there a failure?"}}',
+            )
+        )
+        execute(
+            config_path,
+            state_dir,
+            "decide",
+            backend=name,
+            payload={"context": context, "schema": schema},
         )

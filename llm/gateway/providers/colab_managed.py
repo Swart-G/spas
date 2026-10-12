@@ -13,18 +13,62 @@ class ColabManagedAdapter(RemoteInferenceAdapter):
     def __init__(self, client, auth, config, *, manager=None):
         super().__init__(client, auth, config)
         self.capabilities = Capabilities(
-            streaming=config.remote_streaming,
+            chat=not config.decision_model,
+            decisions=config.decision_model,
+            streaming=config.remote_streaming and not config.decision_model,
             json_output=False,
-            temperature=True,
-            max_output_tokens=True,
+            temperature=not config.decision_model,
+            max_output_tokens=not config.decision_model,
         )
         self.manager = manager or ColabManager(auth.store, client)
+
+    def inference_record(self):
+        record = self.manager.record(self.config.account)
+        if record.get("settings", {}).get("auto_create_runtime") and record.get("stage") not in {
+            "READY",
+            "VERIFYING",
+        }:
+            raise GatewayError(
+                "Модель Colab сейчас не готова. Проверьте состояние VM или дождитесь запуска.",
+                code="provider_unavailable",
+                status=503,
+                retry_after=15,
+            )
+        return record
+
+    async def decide(self, request):
+        record = self.inference_record()
+        settings = DeploymentSettings.model_validate(record["settings"])
+        bridge = await self.manager.connect(self.config.account)
+        result = None
+        async with aclosing(
+            bridge.execute(
+                inference_script(
+                    settings.port,
+                    record["server_key"],
+                    request.payload(self.config.model),
+                    decision=True,
+                ),
+                wait_seconds=self.config.timeout_seconds,
+            )
+        ) as events:
+            async for event in events:
+                if event.get("type") == "http_error":
+                    raise upstream_error(
+                        event.get("status", 503), retry_after=event.get("retry_after")
+                    )
+                if event.get("type") != "response" or result is not None:
+                    raise invalid_response()
+                result = event.get("data")
+        if not isinstance(result, dict):
+            raise invalid_response()
+        return result
 
     async def stream(self, request):
         payload = self._payload(request)
         if request.stream:
             payload["stream_options"] = {"include_usage": True}
-        record = self.manager.record(self.config.account)
+        record = self.inference_record()
         settings = DeploymentSettings.model_validate(record["settings"])
         bridge = await self.manager.connect(self.config.account)
         terminal, usage, confirmed = None, None, False

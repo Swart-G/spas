@@ -1,0 +1,18 @@
+{
+  "context": "The payment service is unavailable for all customers.",
+  "schema": {
+    "priority": {
+      "type": "enum",
+      "description": "Urgency based on the impact on customers.",
+      "choices": ["high", "low"],
+      "choice_descriptions": {
+        "high": "Customers cannot complete a critical operation.",
+        "low": "Only an optional feature is affected."
+      }
+    },
+    "incident": {
+      "type": "boolean",
+      "description": "Is a service unavailable?"
+    }
+  }
+}

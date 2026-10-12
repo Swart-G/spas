@@ -1,7 +1,8 @@
+import asyncio
 import hmac
 import math
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,6 +15,8 @@ from .api import admin, completions
 from .auth.claude import ClaudeProfiles
 from .auth.credentials import CredentialStore
 from .auth.manager import AuthManager
+from .colab.manager import ColabManager
+from .colab.supervisor import RuntimeSupervisor
 from .config import GatewayConfig, default_state_dir
 from .core.audit import RequestLog
 from .core.errors import GatewayError
@@ -91,9 +94,22 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        supervisor = RuntimeSupervisor(
+            ColabManager(store, client),
+            lambda: {
+                backend.config.account
+                for backend in app.state.registry.backends.values()
+                if backend.config.provider == "colab_managed"
+                and store.get("account:" + backend.config.account)
+            },
+        )
+        task = asyncio.create_task(supervisor.run())
         try:
             yield
         finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
             await client.aclose()
             audit.close()
 

@@ -72,11 +72,35 @@ class RemoteInferenceAdapter(LLMProvider):
     def __init__(self, client: httpx.AsyncClient, auth: AuthManager, config: BackendConfig) -> None:
         self.client, self.auth, self.config = client, auth, config
         self.capabilities = Capabilities(
-            streaming=config.remote_streaming,
-            json_output=config.remote_json_output,
-            temperature=True,
-            max_output_tokens=True,
+            chat=not config.decision_model,
+            decisions=config.decision_model,
+            streaming=config.remote_streaming and not config.decision_model,
+            json_output=config.remote_json_output and not config.decision_model,
+            temperature=not config.decision_model,
+            max_output_tokens=not config.decision_model,
         )
+
+    async def decide(self, request):
+        try:
+            response = await self.client.post(
+                self.config.base_url + "/decisions",
+                json=request.payload(self.config.model),
+                headers=self._headers(),
+                timeout=self.config.timeout_seconds,
+                follow_redirects=False,
+            )
+            await self._check_response(response)
+            return response.json()
+        except httpx.TimeoutException as error:
+            raise GatewayError(
+                "Удалённый сервер не ответил вовремя.", code="provider_timeout", status=504
+            ) from error
+        except httpx.HTTPError as error:
+            raise GatewayError(
+                "Удалённый сервер недоступен. Проверьте runtime и URL Colab."
+            ) from error
+        except ValueError as error:
+            raise invalid_response() from error
 
     def _headers(self) -> dict[str, str]:
         record = self.auth.require_account(self.config.account, "remote_inference")

@@ -1,6 +1,7 @@
 import ast
 import asyncio
 import base64
+import io
 import json
 import subprocess
 import sys
@@ -391,16 +392,19 @@ def test_generated_installer_repairs_pipless_venv_and_sanitizes_failure(tmp_path
         def __init__(self, arguments, **options):
             calls.append(arguments)
             self.returncode = 0 if "venv" in arguments else 1
-
-        def communicate(self, **options):
+            self.stdout = io.StringIO("")
+            self.stdin = io.StringIO()
             if self.returncode == 0:
                 assert "--without-pip" in calls[-1]  # This runtime has no ensurepip.
-                return "", ""
-            return (
-                "",
-                "ERROR: No matching distribution found for fastapi==0.143.0\n"
-                "private-hf-token private-server-key https://private.example/token",
-            )
+                self.stderr = io.StringIO("")
+            else:
+                self.stderr = io.StringIO(
+                    "ERROR: No matching distribution found for fastapi==0.143.0\n"
+                    "private-hf-token private-server-key https://private.example/token"
+                )
+
+        def wait(self, **options):
+            return self.returncode
 
     monkeypatch.setattr(subprocess, "Popen", Process)
     display = types.ModuleType("IPython.display")
@@ -567,3 +571,103 @@ def test_remote_scripts_compile_and_keep_user_inputs_as_data():
         compile(code, "cell", "exec")
         assert hostile not in code and "private-hf-token" not in code
     assert script_data(script)["hf_token"] == "private-hf-token"
+
+
+async def test_nimble_start_verifies_a_decision_through_jupyter_not_chat(deployment):
+    manager, service, bridge, settings = deployment
+    settings = settings.model_copy(update={"model_repo": "bespokelabs/Bespoke-Nimble-9B"})
+    await manager.configure("colab-main", settings)
+    bridge.inference_events = [
+        {
+            "type": "response",
+            "data": {
+                "output": {"outage": True},
+                "fields": {"outage": {"scores": {"false": 0.1, "true": 0.9}}},
+            },
+        }
+    ]
+    await manager.start("colab-main")
+    assert bridge.payloads[0]["decision_model"] is True
+    assert bridge.payloads[1]["endpoint"] == "decisions"
+    assert "messages" not in bridge.payloads[1]["payload"]
+    assert manager.record("colab-main")["stage"] == "READY"
+
+
+async def test_start_forwards_sanitized_download_counters_without_changing_stage(deployment):
+    manager, _, bridge, _ = deployment
+    execute = bridge.execute
+
+    async def with_progress(code, **options):
+        async for event in execute(code, **options):
+            if event.get("stage") == "DOWNLOADING":
+                yield event
+                yield {
+                    "type": "progress",
+                    "step": "model_download",
+                    "status": "running",
+                    "completed": 5,
+                    "total": 10,
+                    "unit": "bytes",
+                    "message": "private-secret",
+                }
+                yield {"type": "progress", "step": "model_download", "status": "done"}
+            else:
+                yield event
+
+    bridge.execute = with_progress
+    events, stages = [], []
+    await manager.start("colab-main", stages.append, progress=events.append)
+    counters = next(event for event in events if "completed" in event)
+    assert counters["completed"] == 5 and counters["total"] == 10
+    assert "private" not in json.dumps(events)
+    assert stages == [
+        "ALLOCATING",
+        "INSTALLING",
+        "DOWNLOADING",
+        "STARTING",
+        "READY",
+        "VERIFYING",
+        "VERIFIED",
+    ]
+    assert manager.record("colab-main")["stage"] == "READY"
+
+
+async def test_nimble_preparation_failure_is_not_reported_as_download_failure(deployment):
+    manager, _, bridge, _ = deployment
+    bridge.failure = "DOWNLOADING"
+    bridge.failure_detail = {"step": "nimble_prepare", "reason": "out_of_memory", "exit_code": 1}
+    original = bridge.execute
+
+    async def prepare_failure(code, **options):
+        async for event in original(code, **options):
+            if event.get("stage") == "FAILED":
+                event = {**event, "phase": "PREPARING"}
+            yield event
+
+    bridge.execute = prepare_failure
+    with pytest.raises(GatewayError) as error:
+        await manager.start("colab-main")
+    assert error.value.code == "colab_model_prepare_failed"
+    assert "недостаточно RAM" in error.value.message
+    assert manager.record("colab-main")["last_error_stage"] == "PREPARING"
+
+
+async def test_automatic_start_rechecks_disabled_or_manually_paused_policy(deployment):
+    manager, service, _, _ = deployment
+    await manager.start("colab-main", automatic=True)
+    assert not service.requests
+    await manager.set_runtime_policy("colab-main", enabled=True, lifetime_hours=24)
+    await manager.patch("colab-main", auto_creation_paused=True)
+    await manager.start("colab-main", automatic=True)
+    assert not service.requests
+
+
+async def test_stopped_model_pauses_automation_but_keeps_vm_clock(deployment):
+    manager, _, _, _ = deployment
+    await manager.set_runtime_policy("colab-main", enabled=True, lifetime_hours=12)
+    await manager.start("colab-main")
+    started = manager.record("colab-main")["runtime_started_at"]
+    await manager.stop("colab-main")
+    record = manager.record("colab-main")
+    assert record["auto_creation_paused"] is True
+    assert record["runtime_name"] and record["runtime_started_at"] == started

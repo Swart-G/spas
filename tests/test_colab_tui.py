@@ -65,6 +65,7 @@ def test_managed_colab_wizard_saves_model_gpu_transport_and_encrypted_tokens(
             "team/tiny",
             "main",
             "auto",
+            "auto",
             "private-hf-token",
             "colab-default",
         ],
@@ -266,3 +267,50 @@ def test_remove_managed_connection_releases_runtime_before_cleaning_routes(
         assert saved.routes["fallback"] == ["claude"]
         reload.assert_awaited_once_with(tmp_path)
     deletion.assert_awaited_once_with(tmp_path, "gpu-main", "delete")
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_full_start_display_includes_gateway_reload_and_retains_failure(
+    tmp_path, monkeypatch, failed
+):
+    path = tmp_path / "gateway.toml"
+    initialize(tmp_path, path)
+    config = initial_config()
+    config.backends["gpu"] = BackendConfig(
+        provider="colab_managed", account="gpu", model="team/tiny"
+    )
+    displays = []
+
+    class Display:
+        def __init__(self, *args, **kwargs):
+            self.events = []
+            self.error = None
+            displays.append(self)
+
+        def __enter__(self):
+            return self
+
+        def update(self, event):
+            self.events.append(event)
+
+        def __exit__(self, kind, error, traceback):
+            self.error = error
+
+    async def start(state_dir, account, operation, *, progress):
+        assert account == "gpu" and operation == "start"
+        progress({"step": "verify", "status": "done"})
+
+    reload = AsyncMock(side_effect=GatewayError("reload failed") if failed else None)
+    monkeypatch.setattr(tui, "StartupDisplay", Display)
+    monkeypatch.setattr(tui, "deployment_action", start)
+    monkeypatch.setattr(tui, "apply_gateway", reload)
+    if failed:
+        with pytest.raises(GatewayError) as error:
+            tui.full_colab_action(config, path, tmp_path, "start", name="gpu")
+        assert error.value.code == "gateway_reload_pending"
+        assert displays[0].error is error.value
+    else:
+        tui.full_colab_action(config, path, tmp_path, "start", name="gpu")
+        assert displays[0].events[-1] == {"step": "route", "status": "done"}
+    reload.assert_awaited_once_with(tmp_path)
+    assert {"step": "route", "status": "running"} in displays[0].events

@@ -8,6 +8,7 @@ from contextlib import aclosing, suppress
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
+from ..core.decisions import DecisionRequest
 from ..core.errors import GatewayError
 from ..core.models import ChatRequest, StreamEvent
 from .disconnect import until_disconnect
@@ -127,6 +128,12 @@ def build_routes(authorize) -> APIRouter:
             consume(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @routes.post("/decisions")
+    async def decisions(body: DecisionRequest, request: Request):
+        return await until_disconnect(
+            request, request.app.state.router.decide(body, "decision-" + uuid.uuid4().hex)
         )
 
     return routes

@@ -31,6 +31,14 @@ class BackendConfig(BaseModel):
     remote_streaming: bool = True
     remote_include_usage: bool = False
     remote_json_output: bool = False
+    model_kind: Literal["auto", "chat", "nimble"] = "auto"
+
+    @property
+    def decision_model(self) -> bool:
+        return self.model_kind == "nimble" or (
+            self.model_kind == "auto"
+            and self.model.lower().startswith("bespokelabs/bespoke-nimble-")
+        )
 
     @model_validator(mode="after")
     def validate_endpoint(self) -> "BackendConfig":

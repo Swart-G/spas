@@ -14,6 +14,11 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+if __package__:
+    from ..core.decisions import DecisionRequest
+else:
+    from decisions import DecisionRequest
+
 
 class Message(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -35,7 +40,9 @@ class Completion(BaseModel):
 
 def create_server(config, *, engine=None):
     if engine is None:
-        engine = TransformersEngine(config)
+        engine = (
+            NimbleEngine(config) if config.get("decision_model") else TransformersEngine(config)
+        )
     generation_lock = threading.Lock()
 
     @asynccontextmanager
@@ -61,6 +68,8 @@ def create_server(config, *, engine=None):
         body: Completion, request: Request, authorization: str | None = Header(default=None)
     ):
         authorize(authorization)
+        if config.get("decision_model"):
+            raise HTTPException(400, "Use /v1/decisions for this model")
         if body.model != config["model_repo"]:
             raise HTTPException(404, "Model not found")
         if body.n != 1 or (body.response_format and body.response_format.get("type") != "text"):
@@ -203,7 +212,79 @@ def create_server(config, *, engine=None):
             "usage": terminal["usage"],
         }
 
+    @app.post("/v1/decisions")
+    async def decisions(body: DecisionRequest, authorization: str | None = Header(default=None)):
+        authorize(authorization)
+        if not config.get("decision_model"):
+            raise HTTPException(400, "Model does not support decisions")
+        if body.model != config["model_repo"]:
+            raise HTTPException(404, "Model not found")
+        if not generation_lock.acquire(blocking=False):
+            raise HTTPException(429, "Model is busy", headers={"Retry-After": "1"})
+
+        def score():
+            try:
+                return engine.decide(body)
+            except ValueError as error:
+                raise HTTPException(400, "Invalid schema or prompt exceeds model limit") from error
+            except Exception as error:
+                raise HTTPException(502, "Model scoring failed") from error
+            finally:
+                generation_lock.release()
+
+        # Keep the model locked until the worker finishes, including client cancellation.
+        task = asyncio.create_task(asyncio.to_thread(score))
+        task.add_done_callback(
+            lambda finished: finished.exception() if not finished.cancelled() else None
+        )
+        return await asyncio.shield(task)
+
     return app
+
+
+class NimbleEngine:
+    def __init__(self, config):
+        self.config = config
+
+    def load(self):
+        import os
+        import sys
+
+        import torch
+
+        sys.path.insert(0, self.config["scorer_source"])
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        from nimble.scoring.cuda_scorer import CudaCandidateScorer
+
+        precision = self.config["precision"]
+        if precision == "auto":
+            precision = "bfloat16" if torch.cuda.is_bf16_supported() else "float16"
+        if self.config.get("adapter_snapshot"):
+            if __package__:
+                from .nimble_runtime import load_adapter_scorer
+            else:
+                from nimble_runtime import load_adapter_scorer
+
+            self.scorer = load_adapter_scorer(self.config, precision)
+            return
+        self.scorer = CudaCandidateScorer(
+            model_path=self.config["snapshot"],
+            model_id=self.config["model_repo"],
+            revision=self.config["commit"],
+            max_input_tokens=self.config["max_input_tokens"],
+            dtype=precision,
+            device_map="auto",
+        )
+
+    def decide(self, request):
+        payload = request.payload(self.config["model_repo"])
+        result = self.scorer.score(payload["context"], payload["schema"])
+        return {
+            "model": result["model"],
+            "revision": result["revision"],
+            "output": result["output"],
+            "fields": result["fields"],
+        }
 
 
 class TransformersEngine:

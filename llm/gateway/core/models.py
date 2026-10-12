@@ -56,6 +56,8 @@ class ChatRequest(BaseModel):
 
 @dataclass(frozen=True)
 class Capabilities:
+    chat: bool = True
+    decisions: bool = False
     streaming: bool = True
     json_output: bool = False
     tool_calling: bool = False
@@ -63,6 +65,12 @@ class Capabilities:
     max_output_tokens: bool = False
 
     def validate(self, request: ChatRequest) -> None:
+        if not self.chat:
+            raise GatewayError(
+                "Модель решений принимает /v1/decisions.",
+                code="unsupported_parameter",
+                status=400,
+            )
         unsupported = []
         if request.stream and not self.streaming:
             unsupported.append("stream")
