@@ -54,8 +54,8 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         logging.basicConfig(level=logging.INFO, format="%(message)s")
-        # HTTP client preserves platform proxy and CA settings. Redirects stay disabled.
-        gateway_client = client or httpx.AsyncClient(follow_redirects=False)
+        # Connect directly to the configured Gateway, independent of system proxy settings.
+        gateway_client = client or httpx.AsyncClient(follow_redirects=False, trust_env=False)
         app.state.analyzer = Analyzer(LLMGateway(settings, gateway_client))
         try:
             yield

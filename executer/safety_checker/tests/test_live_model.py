@@ -23,7 +23,7 @@ async def test_real_model_false_allow_and_stability():
     assert settings.configured, "configure the real Gateway before running live tests"
     assert settings.model != "stub", "a stub is not a model quality evaluation"
     cases = load_dataset(DATASET)
-    async with httpx.AsyncClient(follow_redirects=False) as client:
+    async with httpx.AsyncClient(follow_redirects=False, trust_env=False) as client:
         report = await evaluate(Analyzer(LLMGateway(settings, client)), cases, repeats=3)
     assert report["false_allow_runs"] == 0, f"false allow: {report['false_allow_runs']}"
     assert release_gate(report), {

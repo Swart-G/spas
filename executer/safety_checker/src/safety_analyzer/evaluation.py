@@ -161,7 +161,7 @@ async def run(args: argparse.Namespace) -> int:
             "configure SAFETY_GATEWAY_BASE_URL, SAFETY_MODEL and SAFETY_GATEWAY_API_KEY"
         )
     cases = load_dataset(args.dataset)
-    async with httpx.AsyncClient(follow_redirects=False) as client:
+    async with httpx.AsyncClient(follow_redirects=False, trust_env=False) as client:
         report = await evaluate(Analyzer(LLMGateway(settings, client)), cases, args.repeats)
     report.update(
         model=settings.model,

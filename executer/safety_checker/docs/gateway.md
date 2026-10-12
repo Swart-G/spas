@@ -36,7 +36,11 @@ Provider key хранится в vault SPAS, Analyzer получает толь�
 Нет повторов, переходов по redirect, автоматического переключения формата или модели;
 маршрут Gateway для оценки должен содержать один backend без резервной модели.
 Для HTTP разрешён внутренний Gateway; через внешнюю сеть используйте HTTPS.
-httpx сохраняет TLS/CA проверку и стандартные proxy env; проверки не отключаются.
+HTTP-клиенты Analyzer и оценки используют `trust_env=false`: `HTTP_PROXY`,
+`HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` и их варианты в нижнем регистре игнорируются.
+Соединение идёт напрямую с настроенным Gateway; `socksio` не требуется. Стандартная
+проверка TLS остаётся включённой; переменные `SSL_CERT_FILE`/`SSL_CERT_DIR` также
+не наследуются. Переданный извне тестовый HTTP-клиент управляется вызывающим кодом.
 
 `tests/test_spas_contract.py` проверяет весь путь Analyzer → настоящий SPAS HTTP API →
 Router → RemoteInferenceAdapter → подменённый remote inference. Зависимость закреплена
