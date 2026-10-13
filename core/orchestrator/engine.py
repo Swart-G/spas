@@ -1,4 +1,5 @@
 import asyncio
+from math import isfinite
 from uuid import UUID
 
 from agents.base import BaseSlaveAgent
@@ -10,12 +11,10 @@ from shared.time import utc_now
 class Orchestrator:
     """Coordinates processing steps for incidents."""
 
-    def __init__(self, agent_timeout: float = 10.0):
-        if agent_timeout <= 0:
-            raise ValueError("agent_timeout must be greater than zero")
-
+    def __init__(self, agent_timeout: float = 10.0, *, cleanup_timeout: float = 10.0):
         self.storage: dict[UUID, Incident] = {}
         self.agent_timeout = agent_timeout
+        self.cleanup_timeout = cleanup_timeout
 
         self.agents: dict[RoleEnum, BaseSlaveAgent] = {
             RoleEnum.TRIAGE: BaseSlaveAgent(RoleEnum.TRIAGE),
@@ -23,6 +22,28 @@ class Orchestrator:
 
         # Prevent concurrent processing of the same incident.
         self._locks: dict[UUID, asyncio.Lock] = {}
+        # Keep unfinished agents alive and prevent overlap after a cleanup timeout.
+        self._active_agents: dict[UUID, asyncio.Task[AgentResult]] = {}
+
+    @property
+    def agent_timeout(self) -> float:
+        return self._agent_timeout
+
+    @agent_timeout.setter
+    def agent_timeout(self, value: float) -> None:
+        if not isfinite(value) or value <= 0:
+            raise ValueError("agent_timeout must be finite and greater than zero")
+        self._agent_timeout = value
+
+    @property
+    def cleanup_timeout(self) -> float:
+        return self._cleanup_timeout
+
+    @cleanup_timeout.setter
+    def cleanup_timeout(self, value: float) -> None:
+        if not isfinite(value) or value <= 0:
+            raise ValueError("cleanup_timeout must be finite and greater than zero")
+        self._cleanup_timeout = value
 
     async def create_incident(
         self, title: str, description: str
@@ -38,21 +59,14 @@ class Orchestrator:
             raise ValueError(f"Incident not found: {incident_id}")
 
         async with self._locks[incident_id]:
+            active_agent = self._active_agents.get(incident_id)
+            if active_agent is not None and not active_agent.done():
+                return
             # This initial version implements the Triage step only.
             if incident.status != IncidentStatus.NEW:
                 return
 
             incident.update_status(IncidentStatus.INVESTIGATING)
-
-            message = AgentMessage(
-                incident_id=incident.incident_id,
-                receiver=RoleEnum.TRIAGE,
-                task_description=(
-                    "Проанализируй описание инцидента "
-                    "и выдели ключевые метрики."
-                ),
-                payload={"text": incident.description},
-            )
 
             caller = asyncio.current_task()
             cancel_requests = caller.cancelling() if caller is not None else 0
@@ -60,41 +74,101 @@ class Orchestrator:
             def caller_was_cancelled() -> bool:
                 return caller is not None and caller.cancelling() > cancel_requests
 
+            agent_task = None
             try:
+                message = AgentMessage(
+                    incident_id=incident.incident_id,
+                    receiver=RoleEnum.TRIAGE,
+                    task_description=(
+                        "Проанализируй описание инцидента "
+                        "и выдели ключевые метрики."
+                    ),
+                    payload={"text": incident.description},
+                )
                 agent = self.agents[RoleEnum.TRIAGE]
-                deadline = asyncio.timeout(self.agent_timeout)
+                loop = asyncio.get_running_loop()
+                execution_deadline = loop.time() + self.agent_timeout
+                deadline = asyncio.timeout_at(execution_deadline)
                 async with deadline:
-                    # Isolate the caller's cancellation counter from the agent.
-                    result = await asyncio.create_task(agent.process(message))
+                    # Eager task factories may execute the agent during creation.
+                    agent_task = asyncio.create_task(agent.process(message))
+                    self._active_agents[incident_id] = agent_task
+                    agent_task.add_done_callback(
+                        lambda task: self._agent_finished(incident_id, task)
+                    )
+                    # Caller/deadline cancellation interrupts only this wait.
+                    # The agent is cancelled once, outside the execution timer.
+                    await asyncio.wait({agent_task})
+                    result = agent_task.result()
 
                 if caller_was_cancelled():
                     raise asyncio.CancelledError
-                if deadline.expired():
-                    # An agent can suppress timeout cancellation as well.
+                if deadline.expired() or loop.time() >= execution_deadline:
+                    # Never accept a result after the execution deadline expired.
                     raise TimeoutError("Agent processing timed out")
 
                 result = self._validate_result(message, result)
                 self._handle_agent_result(incident, result)
 
             except asyncio.CancelledError:
-                # The step has no committed result; release the lock with a
-                # retryable state, but preserve cancellation for the caller.
-                incident.update_status(IncidentStatus.NEW)
+                completed = await self._stop_agent(agent_task)
+                incident.update_status(
+                    IncidentStatus.NEW if completed else IncidentStatus.FAILED
+                )
                 raise
 
             except Exception as exc:
+                cancelled = caller_was_cancelled()
+                completed = await self._stop_agent(agent_task)
+                incident.update_status(
+                    IncidentStatus.NEW if cancelled and completed else IncidentStatus.FAILED
+                )
                 if caller_was_cancelled():
-                    # Cleanup errors must not turn an interrupted step into a
-                    # permanent failure or swallow the caller's cancellation.
-                    incident.update_status(IncidentStatus.NEW)
+                    # Cancellation received during cleanup must also propagate.
                     raise asyncio.CancelledError from exc
-                # Agent implementations may raise arbitrary exceptions.
-                # Do not leave the incident in an intermediate state.
-                incident.update_status(IncidentStatus.FAILED)
                 print(
                     f"[Orchestrator] Ошибка обработки "
                     f"{incident_id}: {exc}"
                 )
+
+    async def _stop_agent(self, task: asyncio.Task[AgentResult] | None) -> bool:
+        """Confirm error-free termination within a separate cleanup deadline."""
+        if task is None:
+            return True
+        if task.done():
+            return self._completed_without_error(task)
+        if not task.cancelling():
+            task.cancel()
+
+        # A fixed deadline bounds cleanup even if the caller is cancelled again.
+        # asyncio.wait's timeout/cancellation never propagates into its tasks.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.cleanup_timeout
+        while not task.done():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            try:
+                done, _ = await asyncio.wait({task}, timeout=remaining)
+            except asyncio.CancelledError:
+                continue
+            if not done:
+                return False
+        # The event loop may have been blocked while the agent finished. A done
+        # task is not proof that cleanup was confirmed within the allowed time.
+        return loop.time() <= deadline and self._completed_without_error(task)
+
+    @staticmethod
+    def _completed_without_error(task: asyncio.Task[AgentResult]) -> bool:
+        # An exception during teardown leaves resource release unconfirmed.
+        return task.cancelled() or task.exception() is None
+
+    def _agent_finished(self, incident_id: UUID, task: asyncio.Task[AgentResult]) -> None:
+        if self._active_agents.get(incident_id) is task:
+            del self._active_agents[incident_id]
+        if not task.cancelled():
+            # Observe late failures after cleanup timeout; never commit late results.
+            task.exception()
 
     @staticmethod
     def _validate_result(

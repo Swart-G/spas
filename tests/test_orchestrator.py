@@ -377,13 +377,15 @@ async def test_agent_cannot_swallow_caller_cancellation(orchestrator, incident, 
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert incident.status == IncidentStatus.NEW
+    # Failed cleanup cannot establish that resources are safe for another attempt.
+    expected_status = IncidentStatus.FAILED if outcome == "error" else IncidentStatus.NEW
+    assert incident.status == expected_status
     assert incident.history == []
     assert incident.metrics_log == {}
     agent = SuccessfulAgent()
     orchestrator.agents[RoleEnum.TRIAGE] = agent
     await orchestrator.execute_next_step(incident.incident_id)
-    assert agent.calls == 1
+    assert agent.calls == (0 if outcome == "error" else 1)
 
 
 @pytest.mark.asyncio
