@@ -140,7 +140,7 @@ def create_app(
         current = app.state.registry
         for name, backend in current.backends.items():
             replacement = updated.backends.get(name)
-            if replacement is not None and replacement != backend.config:
+            if replacement != backend.config:
                 if backend.semaphore._value < backend.config.max_concurrency:
                     raise GatewayError(
                         "Подключение выполняет запрос. Повторите применение настроек.",

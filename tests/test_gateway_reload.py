@@ -77,3 +77,45 @@ async def test_reload_rejects_modifying_busy_backend_and_invalid_config(gateway)
     assert invalid.status_code == 400 and invalid.json()["error"]["code"] == "invalid_config"
     assert app.state.router is previous_router
     assert "private-token" not in invalid.text
+
+
+async def test_reload_rejects_removing_busy_backend_until_slot_is_released(gateway):
+    app, client, config, path = gateway
+    previous_registry = app.state.registry
+    previous_router = app.state.router
+    backend = previous_registry.backends["remote"]
+    headers = {"Authorization": "Bearer " + KEYS.admin}
+    removed = config.model_copy(deep=True)
+    removed.backends.clear()
+    removed.routes.clear()
+    removed.backends["other"] = config.backends["remote"].model_copy(
+        update={"account": "remote-other"}
+    )
+    removed.routes["other"] = ["other"]
+
+    await backend.semaphore.acquire()
+    try:
+        save_config(removed, path)
+        busy = await client.post("/admin/reload", headers=headers)
+        assert busy.status_code == 409
+        assert busy.json()["error"]["code"] == "backend_busy"
+        assert app.state.registry is previous_registry
+        assert app.state.router is previous_router
+
+        save_config(config, path)
+        restored = await client.post("/admin/reload", headers=headers)
+        assert restored.status_code == 200
+        assert app.state.registry.backends["remote"] is backend
+        assert backend.semaphore.locked()
+    finally:
+        backend.semaphore.release()
+
+    save_config(removed, path)
+    applied = await client.post("/admin/reload", headers=headers)
+    assert applied.status_code == 200
+    assert "remote" not in app.state.registry.backends
+
+    save_config(config, path)
+    restored = await client.post("/admin/reload", headers=headers)
+    assert restored.status_code == 200
+    assert not app.state.registry.backends["remote"].semaphore.locked()
