@@ -77,6 +77,9 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.message_id, message.message_id)
         self.assertEqual(result.incident_id, incident.incident_id)
         self.assertTrue(result.output_data["plan"]["steps"])
+        accepted = orchestrator._validate_result(message, result)
+        orchestrator._handle_agent_result(incident, accepted)
+        self.assertEqual(incident.history[-1], result)
 
     async def test_gateway_planner_calls_existing_chat_contract(self):
         requests = []
@@ -120,6 +123,71 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.incident_id, message.incident_id)
         self.assertEqual(result.output_data, {})
         self.assertEqual(result.error_message, "Worker could not create a valid plan")
+
+    async def test_gateway_rejects_plan_from_truncated_completion(self):
+        complete_looking_plan = json.dumps({
+            "summary": "Database timeout", "steps": ["Check connections"]
+        })
+        planner = GatewayPlanner(
+            base_url="https://gateway.example",
+            model="worker-default",
+            api_key="test-key",
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json={
+                "choices": [{
+                    "finish_reason": "length",
+                    "message": {"content": complete_looking_plan},
+                }],
+            })),
+        )
+        result = await WorkerAgent(planner).process(worker_message())
+        self.assertFalse(result.is_success)
+        self.assertEqual(result.output_data, {})
+
+    async def test_gateway_rejects_remote_plain_http_without_explicit_opt_in(self):
+        for base_url in (
+            "http://gateway.example:8008",
+            "http://localhost.evil.example:8008",
+            "http://127.0.0.1.evil.example:8008",
+        ):
+            with self.subTest(base_url=base_url), self.assertRaisesRegex(ValueError, "explicit opt-in"):
+                GatewayPlanner(base_url=base_url, model="worker-default", api_key="test-key")
+        with self.assertRaisesRegex(ValueError, "boolean"):
+            GatewayPlanner(
+                base_url="http://gateway.example:8008",
+                model="worker-default",
+                api_key="test-key",
+                allow_insecure_http="false",
+            )
+        for base_url in ("https://gateway.example?", "https://gateway.example#"):
+            with self.subTest(base_url=base_url), self.assertRaises(ValueError):
+                GatewayPlanner(base_url=base_url, model="worker-default", api_key="test-key")
+        for base_url in ("http://127.0.0.1:8008", "http://localhost:8008", "http://[::1]:8008"):
+            GatewayPlanner(base_url=base_url, model="worker-default", api_key="test-key")
+
+        requests = []
+
+        def gateway(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({
+                "summary": "Check", "steps": ["Inspect service"]
+            })}}]})
+
+        planner = GatewayPlanner(
+            base_url="http://gateway:8008",
+            model="worker-default",
+            api_key="test-key",
+            allow_insecure_http=True,
+            transport=httpx.MockTransport(gateway),
+        )
+        result = await WorkerAgent(planner).process(worker_message())
+        self.assertTrue(result.is_success)
+        self.assertEqual(str(requests[0].url), "http://gateway:8008/v1/chat/completions")
+        self.assertEqual(requests[0].headers["Authorization"], "Bearer test-key")
+
+    async def test_worker_rejects_message_from_other_agent(self):
+        message = worker_message().model_copy(update={"sender": RoleEnum.TRIAGE})
+        with self.assertRaisesRegex(ValueError, "only from Orchestrator"):
+            await WorkerAgent().process(message)
 
     async def test_invalid_plan_is_not_passed_to_other_agents(self):
         class InvalidPlanner:

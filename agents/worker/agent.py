@@ -21,6 +21,8 @@ class WorkerAgent(BaseSlaveAgent):
         message = AgentMessage.model_validate(message.model_dump())
         if message.receiver != self.role:
             raise ValueError("Message is not addressed to Worker Agent")
+        if message.sender != RoleEnum.ORCHESTRATOR:
+            raise ValueError("Worker accepts commands only from Orchestrator")
 
         description = message.payload.get("problem_description")
         if description is None:

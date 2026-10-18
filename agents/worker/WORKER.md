@@ -51,7 +51,7 @@ python -m agents.worker.demo "PostgreSQL connection timeout"
 Для подключённого LLM Gateway:
 
 ```sh
-export SPAS_GATEWAY_URL=http://127.0.0.1:8000
+export SPAS_GATEWAY_URL=http://127.0.0.1:8008
 export SPAS_WORKER_MODEL=codex-default
 export SPAS_GATEWAY_KEY='ключ клиента Gateway'
 python -m agents.worker.demo --gateway "PostgreSQL connection timeout"
@@ -59,6 +59,12 @@ python -m agents.worker.demo --gateway "PostgreSQL connection timeout"
 
 `SPAS_WORKER_MODEL` — alias маршрута или имя модели, настроенное в Gateway.
 Адрес Gateway и ключ задаются оператором, в репозиторий их не добавляют.
+Для удалённого Gateway используйте HTTPS. Локальный `http://127.0.0.1` и
+`http://localhost` разрешены без дополнительной настройки. Если Gateway
+доступен только по HTTP внутри Docker-сети (например, `http://gateway:8008`),
+добавьте `--allow-insecure-http` к команде demo или передайте
+`allow_insecure_http=True` в `GatewayPlanner`. При этом ключ и описание
+инцидента передаются по сети без шифрования.
 
 Проверка: `python -m unittest discover -s tests -p 'test_worker_agent.py' -v`.
 
