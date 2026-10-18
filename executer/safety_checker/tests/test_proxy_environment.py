@@ -128,6 +128,18 @@ async def test_startup_and_analysis_ignore_proxy_environment(
         assert result["verdict"] == verdict and result["status"] == "ok"
         assert result["decision"] == ("allow" if verdict == "safe" else "block")
         assert result["error_code"] is None
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://analyzer.test", trust_env=False
+        ) as api:
+            command = await api.post(
+                "/v1/commands/analyze",
+                json={
+                    "command": ["pwd"],
+                    "context": {"incident_id": "i", "reason": "diagnose"},
+                },
+            )
+        assert command.status_code == 200
+        assert command.json()["decision"] == ("ALLOW" if verdict == "safe" else "DENY")
     assert owned_client.is_closed
 
 

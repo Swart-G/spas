@@ -14,6 +14,7 @@ dependencies = [
 dev = ["pytest>=8.3,<9", "pytest-asyncio>=0.25,<1", "ruff>=0.9,<1"]
 integration = [
   "spas-llm-gateway @ git+https://github.com/Swart-G/spas.git@2968247a5bed416054a66bd08ef18589f77230ed",
+  "mcp==2.2.0",
 ]
 
 [build-system]

@@ -7,6 +7,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from safety_analyzer.command_contracts import CommandAnalysisRequest, CommandAnalysisResponse
+from safety_analyzer.commands import CommandAnalyzer, configured_rules
 from safety_analyzer.config import Settings
 from safety_analyzer.contracts import AnalyzeRequest, AnalyzeResponse
 from safety_analyzer.gateway import LLMGateway
@@ -56,8 +58,11 @@ def create_app(
         logging.basicConfig(level=logging.INFO, format="%(message)s")
         # Connect directly to the configured Gateway, independent of system proxy settings.
         gateway_client = client or httpx.AsyncClient(follow_redirects=False, trust_env=False)
-        app.state.analyzer = Analyzer(LLMGateway(settings, gateway_client))
         try:
+            app.state.analyzer = Analyzer(LLMGateway(settings, gateway_client))
+            app.state.command_analyzer = CommandAnalyzer(
+                app.state.analyzer.gateway, configured_rules(settings)
+            )
             yield
         finally:
             if client is None:
@@ -95,7 +100,22 @@ def create_app(
         },
     )
     async def analyze(request: AnalyzeRequest):
+        if request.target == "command":
+            return JSONResponse(
+                {"detail": "Use /v1/commands/analyze with literal argv and incident context"}, 422
+            )
         response = await app.state.analyzer.analyze(request)
+        return JSONResponse(
+            response.model_dump(mode="json"), status_code=200 if response.status == "ok" else 503
+        )
+
+    @app.post(
+        "/v1/commands/analyze",
+        response_model=CommandAnalysisResponse,
+        responses={503: {"model": CommandAnalysisResponse, "description": "Fail-closed DENY"}},
+    )
+    async def analyze_command(request: CommandAnalysisRequest):
+        response = await app.state.command_analyzer.analyze(request)
         return JSONResponse(
             response.model_dump(mode="json"), status_code=200 if response.status == "ok" else 503
         )

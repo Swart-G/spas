@@ -15,6 +15,7 @@ jobs:
           version: "0.12.23"
           python-version: "3.12"
       - run: uv sync --frozen --group integration
+      - run: uv run --frozen --group integration python scripts/prepare_executor_reference.py
       - run: uv run --frozen --group integration ruff check src tests scripts
       - run: uv run --frozen --group integration ruff format --check src tests scripts
       - run: uv run --frozen --group integration pytest -q -m 'not live'

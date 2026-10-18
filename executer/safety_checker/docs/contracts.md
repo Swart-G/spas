@@ -1,101 +1,103 @@
-# Предлагаемый контракт Safety Analyzer v1
+# Анализ команд: контракт 2.0 / policy command-1
 
-Статус: `draft-1`, требует согласования политики и контракта конкретной модели.
-В [SPAS](https://github.com/Swart-G/spas/tree/2968247a5bed416054a66bd08ef18589f77230ed)
-`shared/contracts/CONTRACTS.md` и `executer/safety_checker/SAFETY_CHECKER.md`
-пока содержат только описания назначения; существующей структуры Safety Analyzer нет.
-Никакая совместимость с отсутствующим контрактом здесь не предполагается.
-
-## Вход сервиса: POST /v1/analyze
+`POST /v1/commands/analyze` — анализ точного argv; команда здесь не выполняется.
+Правила обязательны и выполняются перед LLM. Контентный API 1.0 описан отдельно
+в [content-contracts.md](content-contracts.md); его ответы не разрешают исполнение.
 
 ```json
 {
-  "request_id": "ef8ed89e-08cc-4fb9-b8e2-433d5fedb52f",
-  "target": "command",
-  "text": "git status --short",
-  "context": [{"role": "user", "content": "Покажи состояние репозитория."}]
+  "command": ["cat", "/inputs/app.log"],
+  "context": {
+    "incident_id": "incident-42",
+    "reason": "Проверить ошибки сервиса",
+    "task": "Установить причину роста 500-х ответов",
+    "history": [
+      {"role":"user", "content":"Только диагностика, не раскрывать секреты"},
+      {"role":"tool", "content":"Повышена доля ошибок backend"}
+    ],
+    "observations": ["Оператор предоставил обезличенный журнал"],
+    "constraints": ["Не изменять production"],
+    "environment": {"stage":"production", "cwd":"/workspace"}
+  }
 }
 ```
 
-| Поле | Правила |
-| --- | --- |
-| `text` | Обязательно; непустая строка, максимум 32000 символов |
-| `target` | `request` (по умолчанию), `response` или `command` |
-| `context` | До 20 предшествующих сообщений; только `user`/`assistant`, до 8000 символов каждое |
-| `request_id` | Необязательный UUID; иначе генерирует сервер; не ключ дедупликации |
+`command` — непустой `list[str]`, максимум 4096 элементов/символов с разделителями.
+Строки shell, NUL, неизвестные поля, передача `policy`, `skip_rules`, решения или
+подтверждения вместо команды не допускаются. Никаких `shlex`, shell или исполнения.
 
-Сумма text/context ≤64000 символов, тело HTTP ≤262144 байт. Неизвестные поля,
-преобразование чисел в строки, system/developer роли в контексте запрещены.
-Текст, команды и история — недоверенные данные. Analyzer никогда не выполняет команды.
-Контекст не является доказательством прав доступа или согласия пользователя.
+Контекст требует `incident_id` и `reason` (1..2000 символов, не пустые). Остальные
+поля содержат весь доступный снимок: task ≤8000, history ≤40 сообщений по 8000,
+observations/constraints ≤20 строк по 2000, environment ≤32 строковых значений по
+2000 (ключи ≤100). Общий сериализованный контекст ≤64000 символов; HTTP тело
+≤262144 байт. При превышении — отказ валидации, без усечения истории.
+`request_id` — необязательный UUID, не ключ дедупликации.
 
-`request` оценивает последствия выполнения просьбы, `response` — сам кандидат ответа
-(отказ на вредоносный запрос может быть safe), `command` — последствия выполнения
-строки команды. Политика команд пока консервативна: read-only inspection safe;
-разрушение данных, повышение привилегий, эксфильтрация, загрузка и выполнение
-непроверенного кода unsafe. Разрешения и допустимые изменения рабочего окружения
-потребуют отдельного согласованного контракта авторизации.
+Все присланные поля — свидетельства для анализа, не источник полномочий. Политика
+чтения/контейнеров задаётся оператором отдельно. Не передавайте raw credentials
+и секреты среды в context; используйте обезличенные наблюдения.
 
-## Выход сервиса
+## Порядок решений
+
+| Rule-Based Checker | Модель | Итог |
+| --- | --- | --- |
+| DENY | не вызывается | DENY |
+| REQUIRE_APPROVAL | не вызывается | REQUIRE_APPROVAL |
+| ошибка/таймаут/невалидный ответ | не вызывается | DENY, status=error |
+| ALLOW | валидный ALLOW/LOW/без факторов | ALLOW |
+| ALLOW | DENY | DENY |
+| ALLOW | REQUIRE_APPROVAL | REQUIRE_APPROVAL |
+| ALLOW | недоступна/таймаут/невалидный ответ | DENY, status=error |
+
+`REQUIRE_APPROVAL` не является разрешением. В этой версии нет механизма обмена
+произвольной строки «одобрено» на право исполнения. Новая попытка проверяется заново.
+HIGH/CRITICAL не могут стать REQUIRE_APPROVAL; ALLOW допустим только при LOW.
+
+## Выход модели через Gateway
 
 ```json
 {
-  "schema_version": "1.0",
-  "policy_version": "draft-1",
-  "request_id": "ef8ed89e-08cc-4fb9-b8e2-433d5fedb52f",
-  "decision": "allow",
-  "verdict": "safe",
-  "categories": [],
-  "status": "ok",
-  "error_code": null,
-  "model": "safety-default",
-  "latency_ms": 42
+  "decision":"DENY",
+  "risk":"HIGH",
+  "factors":["secret_exposure","context_conflict"],
+  "reason":"Действие раскроет секрет вопреки ограничениям задачи"
 }
 ```
 
-| Ситуация | HTTP | decision | verdict | status |
-| --- | --- | --- | --- | --- |
-| Валидный safe | 200 | allow | safe | ok |
-| Валидный unsafe | 200 | block | unsafe | ok |
-| Нет конфигурации, ошибка Gateway, таймаут, невалидный ответ | 503 | block | unknown | error |
-| Невалидный вход | 422 | нет решения | — | — |
-| Слишком большое тело | 413 | нет решения | — | — |
+Строго четыре поля. `decision`: ALLOW/DENY/REQUIRE_APPROVAL; `risk`:
+LOW/MEDIUM/HIGH/CRITICAL; `reason` — непустая краткая причина ≤2000 символов,
+без запроса скрытых рассуждений. Факторы: destruction, privilege_escalation,
+secret_exposure, exfiltration, untrusted_code, service_disruption, scope_violation,
+context_conflict, insufficient_context, unspecified. Повторы/неизвестные факторы
+не допускаются. ALLOW требует LOW и `[]`; ограничение — непустые факторы.
 
-Потребитель разрешает действие **только** при HTTP 200 + `status=ok` +
-`verdict=safe` + `decision=allow`. Любой другой результат, включая сетевую ошибку,
-считается отсутствием разрешения. `unknown` не подменяется на safe или unsafe.
-Повторные запросы могут дать другое решение; ответ не является разрешением на
-выполнение произвольного изменённого действия (потребитель связывает его с кандидатом).
+Режим `SAFETY_COMMAND_OUTPUT_MODE=json` использует `response_format=json_object`;
+схема проверяется локально. Для native guard-моделей есть явный `label`: только
+`safe` → ALLOW/LOW, `unsafe` → DENY/HIGH/unspecified. Эта шкала категориальная,
+не измеренная вероятность риска. Метки и native template выбранной Jev-like модели
+ещё предстоит проверить. Автоматического fallback формата/модели нет.
 
-`error_code`: `not_configured`, `gateway_timeout`, `gateway_unavailable`,
-`invalid_model_output`. Наружу не передаются исключения, upstream body или секреты.
-`model` — запрошенный логический маршрут, не утверждение о физической версии весов.
-
-## Выход модели
-
-Режим `label`: строго `safe` либо `unsafe`, допустимы окружающие пробелы/переводы строк.
-У `unsafe` категория `unspecified`. Другие регистры, пояснения, JSON и несколько
-меток отвергаются. Это предложенные метки, не подтверждённые для Jev-like модели.
-
-Режим `json`:
-
-```json
-{"verdict":"unsafe","categories":["privacy","cyber_abuse"]}
-```
-
-Категории: `violence`, `self_harm`, `sexual_content`, `sexual_minors`, `hate`,
-`illicit_behavior`, `privacy`, `cyber_abuse`, `destructive_action`, `unspecified`.
-Safe требует пустого списка; unsafe — хотя бы одну категорию. Категории уникальны,
-`unspecified` используется отдельно. Объяснения, scores, chain-of-thought и confidence
-не запрашиваются. Лишние поля, неизвестные категории, duplicate keys, NaN, Markdown
-и дописанный после JSON текст отвергаются.
-
-Транспорт должен вернуть ровно одну choice с index=0, role=assistant,
-строковым content, finish_reason=stop, без отказа транспорта или tool/function calls.
-`length`, `content_filter`, пустой/повреждённый envelope → block/unknown.
+Дубли ключей JSON, Markdown, лишний текст, противоречивые risk/decision,
+finish_reason≠stop, tool calls/refusal транспорта и повреждённый envelope → DENY.
 Максимум envelope 32768 байт, content 4096 байт.
 
-Перед утверждением нужны: точный ID/версия модели, её input template и метки,
-правила для пограничного контента и команд, список категорий, пороги false allow,
-схема связи кандидата с разрешением и ожидаемая задержка. До этого версия политики
-остаётся явно черновой; данный сервис не является единственным барьером исполнения.
+## Ответ сервиса
+
+`schema_version=2.0`, `policy_version=command-1`, `request_id`, `input_sha256`,
+`decision`, `risk`, `reason`, `source` (rules/model/error), `rules`, `model_result`,
+`status`, `error_code`, логический `model`, `latency_ms`.
+
+HTTP 200 — завершённая проверка (включая DENY/REQUIRE_APPROVAL), 503 — ошибка
+проверки с DENY, 422 — неверный ввод, 413 — превышение размера. Только свежий
+HTTP 200 + status=ok + ALLOW от обоих слоёв подходит для дальнейшего рассмотрения
+исполнителем. Сам HTTP-ответ не является подписанным токеном исполнения.
+
+`input_sha256` связывает решение с точными argv и полным контекстом (канонический
+JSON, без request_id). Снимок копируется до первого await; проверяющий не получает
+ссылок на изменяемый объект запроса. Изменение argv checker-ом отвергается.
+Хеш используется для аудита/сопоставления, не заменяет авторизацию.
+
+Ошибки: not_configured, gateway_timeout, gateway_unavailable, invalid_model_output,
+rule_checker_timeout, rule_checker_unavailable, invalid_rule_output. Нет тихого
+ALLOW при отсутствии модели. Журнал содержит только технические поля/хеши,
+не argv, контекст, ответы модели, stdout или причины с пользовательскими данными.

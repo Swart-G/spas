@@ -1,8 +1,14 @@
 # Safety Analyzer
 
-База сервиса безопасности для СПАС. Пока модель не выбрана, используется явная
-локальная заглушка. Политика, категории и метки — **предложение `draft-1` для
-согласования**, а не утверждённый контракт Jev-like модели.
+Модуль анализа argv и полного предоставленного контекста для СПАС. Обязательный
+Rule-Based Checker выполняется перед LLM; запреты и запросы подтверждения модель
+переопределить не может. Пока модель не выбрана, используется явная локальная
+заглушка; качество реальной модели ещё не измерялось.
+
+Рабочий контракт команд: **2.0 / command-1**, [описание](docs/contracts.md).
+[Интеграция с Executor MCP](docs/executor.md) включает host-side `CheckedExecutor`,
+который сохраняет изоляцию контейнера и повторную проверку правил на стороне MCP.
+[Варианты модели](docs/models.md) и пороги качества требуют проверки владельцем политики.
 
 Реализованы FastAPI API, строгая проверка ответа модели, fail-closed обработка ошибок,
 адаптер LLM Gateway, JSON-логирование без содержимого запросов, датасет, offline и
@@ -60,6 +66,22 @@ curl -sS http://127.0.0.1:8000/v1/analyze \
 | `SAFETY_OUTPUT_MODE` | `label` или `json` | `label` |
 | `SAFETY_TIMEOUT_SECONDS` | Общий deadline классификации | `10` |
 | `SAFETY_MAX_TOKENS` | Максимум выходных токенов | `128` |
+| `SAFETY_COMMAND_OUTPUT_MODE` | JSON-решение или native label для команд | `json` |
+| `SAFETY_COMMAND_MAX_TOKENS` | Лимит ответа анализа команды | `512` |
+| `SAFETY_COMMAND_TIMEOUT_SECONDS` | Общий бюджет правил + модели | `4` |
+| `SAFETY_RULE_TIMEOUT_SECONDS` | Бюджет обязательного Checker/provider | `0.5` |
+| `SAFETY_READABLE_PATHS` | JSON-массив точных разрешённых путей | `[]` |
+| `SAFETY_CONTAINERS` | JSON-массив разрешённых контейнеров | `[]` |
+| `SAFETY_DENIED_EXECUTABLES` | Дополнительные запреты executable | `[]` |
+
+Настройки scopes принадлежат оператору; значения из HTTP/context не расширяют их.
+Пример контекстного анализа (dev-заглушка вернёт DENY/model):
+
+```bash
+curl -sS http://127.0.0.1:8000/v1/commands/analyze \
+  -H 'Content-Type: application/json' \
+  -d '{"command":["pwd"],"context":{"incident_id":"incident-1","reason":"Проверить рабочий каталог","constraints":["Только чтение"]}}'
+```
 
 ```bash
 uv run --frozen uvicorn safety_analyzer.app:create_app --factory --host 127.0.0.1 --port 8000
@@ -82,6 +104,9 @@ uv run --frozen --group integration pytest -q -m 'not live'
 uv run --frozen pytest -q tests/test_false_allow.py
 # Отчёт по реальной модели (после настройки переменных):
 uv run --frozen python -m safety_analyzer.evaluation --repeats 3
+# Контекстные команды, включая отдельные model false allow и rule bypass:
+uv run --frozen python -m safety_analyzer.command_evaluation --repeats 3 \
+  --policy-file datasets/command-policy.json
 # Опциональная live-проверка с тем же датасетом:
 SAFETY_RUN_LIVE=1 uv run --frozen pytest -q -m live
 ```
@@ -89,7 +114,10 @@ SAFETY_RUN_LIVE=1 uv run --frozen pytest -q -m live
 Offline-тесты не доказывают устойчивость решений модели. Live-тест пропускается
 без явного включения и запрещает маршрут `stub`.
 Отчёт содержит отдельные false allow, false block, ошибки и изменчивость результатов;
-`reports/` игнорируется Git. Подробности и ограничения: [оценка](docs/evaluation.md),
+`reports/` игнорируется Git. Перед тестами настоящего Executor выполните
+`uv run --frozen --group integration python scripts/prepare_executor_reference.py`
+(также включено в `scripts/cloud-install.sh` и CI).
+Подробности и ограничения: [оценка](docs/evaluation.md),
 [датасет](datasets/README.md).
 
 ## Docker
@@ -117,7 +145,7 @@ docker compose --profile stub up --no-build
 
 ## Где адаптировать после выбора модели
 
-1. Уточнить модель, native input template, точные метки и категории в `docs/contracts.md`.
+1. Уточнить модель, native input template, точные метки и категории в `docs/models.md`.
 2. Изменить `POLICY`, `payload()` и `parse_model_output()` в `gateway.py` под её контракт;
    не распознавать `safe` как подстроку и не делать автоматический fallback формата.
 3. Создать один явный маршрут Gateway на выбранный backend; проверить возможности

@@ -12,6 +12,8 @@ from llm.gateway.auth.manager import AuthManager  # noqa: E402
 from llm.gateway.config import BackendConfig, GatewayConfig  # noqa: E402
 from llm.gateway.main import GatewayKeys, create_app  # noqa: E402
 
+from safety_analyzer.command_contracts import CommandAnalysisRequest, CommandContext  # noqa: E402
+from safety_analyzer.commands import CommandAnalyzer, configured_rules  # noqa: E402
 from safety_analyzer.config import Settings  # noqa: E402
 from safety_analyzer.contracts import AnalyzeRequest  # noqa: E402
 from safety_analyzer.gateway import LLMGateway  # noqa: E402
@@ -88,3 +90,64 @@ async def test_analyzer_through_spas_remote_adapter(
         assert result.error_code == "invalid_model_output"
     else:
         assert result.status == "ok" and len(calls) == 1
+
+
+@pytest.mark.parametrize("mode", ["json", "label"])
+async def test_command_context_through_real_spas_gateway(tmp_path, mode):
+    def upstream(wire):
+        body = json.loads(wire.content)
+        evidence = json.loads(body["messages"][1]["content"])
+        assert evidence["command"] == ["pwd"]
+        assert evidence["context"]["constraints"] == ["Only inspect the working directory"]
+        assert evidence["rules"]["decision"] == "ALLOW"
+        assert body["model"] == "command-model" and body["max_tokens"] == 512
+        output = json.dumps(
+            {"decision": "ALLOW", "risk": "LOW", "factors": [], "reason": "Read-only"}
+        )
+        return httpx.Response(200, json=completion(output if mode == "json" else "safe"))
+
+    config = GatewayConfig(
+        backends={
+            "safety": BackendConfig(
+                provider="remote_inference",
+                account="test-runtime",
+                model="command-model",
+                base_url="https://runtime.test/v1",
+                remote_json_output=mode == "json",
+            )
+        },
+        routes={"safety-default": ["safety"]},
+        fallback_on=[],
+    )
+    async with httpx.AsyncClient(trust_env=False) as auth_client:
+        await AuthManager(CredentialStore(tmp_path), auth_client).save_remote_key(
+            "test-runtime", ""
+        )
+    app = create_app(
+        config,
+        state_dir=tmp_path,
+        keys=GatewayKeys("c" * 32),
+        transport=httpx.MockTransport(upstream),
+    )
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), trust_env=False
+        ) as client:
+            settings = Settings(
+                gateway_base_url="http://gateway.test/v1",
+                gateway_api_key="c" * 32,
+                model="safety-default",
+                command_output_mode=mode,
+            )
+            analyzer = CommandAnalyzer(LLMGateway(settings, client), configured_rules(settings))
+            result = await analyzer.analyze(
+                CommandAnalysisRequest(
+                    command=["pwd"],
+                    context=CommandContext(
+                        incident_id="i",
+                        reason="diagnose",
+                        constraints=["Only inspect the working directory"],
+                    ),
+                )
+            )
+    assert result.decision == "ALLOW" and result.rules.decision == "ALLOW"

@@ -104,6 +104,13 @@ def main() -> None:
                 SAFETY_OUTPUT_MODE="label",
                 SAFETY_TIMEOUT_SECONDS="10",
                 SAFETY_MAX_TOKENS="128",
+                SAFETY_COMMAND_OUTPUT_MODE="json",
+                SAFETY_COMMAND_MAX_TOKENS="512",
+                SAFETY_COMMAND_TIMEOUT_SECONDS="4",
+                SAFETY_RULE_TIMEOUT_SECONDS="0.5",
+                SAFETY_READABLE_PATHS='["/workspace"]',
+                SAFETY_CONTAINERS="[]",
+                SAFETY_DENIED_EXECUTABLES="[]",
             )
             stub = launch(
                 stack,
@@ -134,6 +141,37 @@ def main() -> None:
                     "stub",
                 ):
                     raise RuntimeError("stub functional check returned an unexpected decision")
+                command = client.post(
+                    f"http://127.0.0.1:{analyzer_port}/v1/commands/analyze",
+                    json={
+                        "command": ["pwd"],
+                        "context": {
+                            "incident_id": "dev-smoke",
+                            "reason": "Inspect the working directory",
+                        },
+                    },
+                )
+                command.raise_for_status()
+                assessment = command.json()
+                if (assessment["decision"], assessment["source"], assessment["status"]) != (
+                    "DENY",
+                    "model",
+                    "ok",
+                ) or assessment["rules"]["decision"] != "ALLOW":
+                    raise RuntimeError("contextual command check failed")
+                denied = client.post(
+                    f"http://127.0.0.1:{analyzer_port}/v1/commands/analyze",
+                    json={
+                        "command": ["rm", "-rf", "/"],
+                        "context": {
+                            "incident_id": "dev-smoke",
+                            "reason": "Check an immutable rule deny",
+                        },
+                    },
+                )
+                denied.raise_for_status()
+                if denied.json()["decision"] != "DENY" or denied.json()["source"] != "rules":
+                    raise RuntimeError("mandatory rule gate failed")
             print(
                 json.dumps(
                     {

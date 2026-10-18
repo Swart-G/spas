@@ -6,6 +6,12 @@ Endpoint: `POST /v1/chat/completions`, обязательный `Authorization: 
 `stream=false`, `n=1`. Только классификатор задаёт параметры; HTTP-клиент Analyzer
 не может менять модель, системный prompt или формат.
 
+Для команд используется отдельный `command_payload`: точный argv, полный context
+и проверенный результат правил сериализуются одним user JSON; system policy
+задаётся только сервисом. JSON-ответ содержит decision/risk/factors/reason, лимит
+по умолчанию 512 токенов, общий deadline анализа 4s. Командные настройки отделены
+от прежнего контентного режима; LLM не вызывается после rule DENY/REQUIRE_APPROVAL.
+
 В SPAS `ResponseFormat.type` уже принимает `text` и `json_object`. В режиме label
 Analyzer отправляет `text`, в JSON — `json_object`; валидирует схему локально.
 `json_schema` не поддерживается текущим SPAS и не отправляется.

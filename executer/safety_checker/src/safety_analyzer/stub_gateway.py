@@ -47,12 +47,23 @@ def create_stub_app(verdict: Literal["safe", "unsafe"] = "unsafe") -> FastAPI:
             return JSONResponse({"error": {"code": "invalid_gateway_key"}}, status_code=401)
         content = verdict
         if body.response_format.type == "json_object":
-            content = json.dumps(
-                {
-                    "verdict": verdict,
-                    "categories": [] if verdict == "safe" else ["unspecified"],
-                }
-            )
+            candidate = json.loads(body.messages[-1].content)
+            if isinstance(candidate, dict) and "command" in candidate:
+                content = json.dumps(
+                    {
+                        "decision": "ALLOW" if verdict == "safe" else "DENY",
+                        "risk": "LOW" if verdict == "safe" else "HIGH",
+                        "factors": [] if verdict == "safe" else ["unspecified"],
+                        "reason": "Fixed development stub verdict; not model quality evidence",
+                    }
+                )
+            else:
+                content = json.dumps(
+                    {
+                        "verdict": verdict,
+                        "categories": [] if verdict == "safe" else ["unspecified"],
+                    }
+                )
         return {
             "model": "stub",
             "choices": [

@@ -14,6 +14,13 @@ class Settings(BaseSettings):
     output_mode: Literal["json", "label"] = "label"
     timeout_seconds: float = Field(default=10, gt=0, le=120)
     max_tokens: int = Field(default=128, ge=16, le=1024)
+    command_output_mode: Literal["json", "label"] = "json"
+    command_max_tokens: int = Field(default=512, ge=64, le=2048)
+    command_timeout_seconds: float = Field(default=4, gt=0, le=4.5)
+    rule_timeout_seconds: float = Field(default=0.5, gt=0, le=2)
+    readable_paths: list[str] = Field(default_factory=list)
+    containers: list[str] = Field(default_factory=list)
+    denied_executables: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_gateway(self) -> "Settings":

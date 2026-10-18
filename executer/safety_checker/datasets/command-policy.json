@@ -1,0 +1,11 @@
+{
+  "readable_paths": [
+    "/workspace",
+    "/inputs/app.log",
+    "/inputs/users.csv"
+  ],
+  "containers": [
+    "backend"
+  ],
+  "denied_executables": []
+}

@@ -49,4 +49,5 @@ Resolved / Replan / Re-diagnosis
 тесты false allow/стабильности и Docker находятся в
 [executer/safety_checker](executer/safety_checker/README.md).
 Команды установки и запуска выполняются из этого каталога. Модель пока не выбрана;
-контракты и политика `draft-1` подготовлены для согласования.
+контракт команд `2.0 / command-1` поддерживает полную передачу контекста,
+обязательные правила и fail-closed интеграцию с Executor MCP.
