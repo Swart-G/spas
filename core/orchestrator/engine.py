@@ -3,8 +3,11 @@ from math import isfinite
 from uuid import UUID
 
 from agents.base import BaseSlaveAgent
+from agents.diagnostic import DiagnosticAgent
+from agents.worker import WorkerAgent
 from core.incidents.models import Incident, IncidentStatus
-from shared.contracts.messages import AgentMessage, AgentResult, RoleEnum
+from shared.contracts.messages import AgentMessage, AgentResult, RoleEnum, StageEnum
+from shared.contracts.workflow import DiagnosisData, RemediationData, VerificationData
 from shared.time import utc_now
 
 
@@ -18,6 +21,8 @@ class Orchestrator:
 
         self.agents: dict[RoleEnum, BaseSlaveAgent] = {
             RoleEnum.TRIAGE: BaseSlaveAgent(RoleEnum.TRIAGE),
+            RoleEnum.DIAGNOSTIC: DiagnosticAgent(),
+            RoleEnum.REMEDIATION: WorkerAgent(),
         }
 
         # Prevent concurrent processing of the same incident.
@@ -45,9 +50,7 @@ class Orchestrator:
             raise ValueError("cleanup_timeout must be finite and greater than zero")
         self._cleanup_timeout = value
 
-    async def create_incident(
-        self, title: str, description: str
-    ) -> Incident:
+    async def create_incident(self, title: str, description: str) -> Incident:
         incident = Incident(title=title, description=description)
         self.storage[incident.incident_id] = incident
         self._locks[incident.incident_id] = asyncio.Lock()
@@ -59,77 +62,151 @@ class Orchestrator:
             raise ValueError(f"Incident not found: {incident_id}")
 
         async with self._locks[incident_id]:
-            active_agent = self._active_agents.get(incident_id)
-            if active_agent is not None and not active_agent.done():
-                return
-            # This initial version implements the Triage step only.
-            if incident.status != IncidentStatus.NEW:
-                return
+            await self._execute_step(incident)
 
-            incident.update_status(IncidentStatus.INVESTIGATING)
+    async def process_incident(self, incident_id: UUID) -> Incident:
+        """Run remaining stages once, stopping on failure or cancellation."""
+        incident = self.storage.get(incident_id)
+        if incident is None:
+            raise ValueError(f"Incident not found: {incident_id}")
+        async with self._locks[incident_id]:
+            # A bounded pipeline: verification failure never reruns remediation.
+            for _ in StageEnum:
+                if not await self._execute_step(incident):
+                    break
+        return incident
 
-            caller = asyncio.current_task()
-            cancel_requests = caller.cancelling() if caller is not None else 0
+    async def _execute_step(self, incident: Incident) -> bool:
+        incident_id = incident.incident_id
+        active_agent = self._active_agents.get(incident_id)
+        if active_agent is not None and not active_agent.done():
+            return False
+        if incident.status in (IncidentStatus.RESOLVED, IncidentStatus.FAILED):
+            return False
 
-            def caller_was_cancelled() -> bool:
-                return caller is not None and caller.cancelling() > cancel_requests
+        stage = incident.next_stage
+        previous_status = incident.status
 
-            agent_task = None
-            try:
-                message = AgentMessage(
-                    incident_id=incident.incident_id,
-                    receiver=RoleEnum.TRIAGE,
-                    task_description=(
-                        "Проанализируй описание инцидента "
-                        "и выдели ключевые метрики."
-                    ),
-                    payload={"text": incident.description},
+        caller = asyncio.current_task()
+        cancel_requests = caller.cancelling() if caller is not None else 0
+
+        def caller_was_cancelled() -> bool:
+            return caller is not None and caller.cancelling() > cancel_requests
+
+        agent_task = None
+        try:
+            message = self._prepare_message(incident)
+            if stage == StageEnum.TRIAGE:
+                incident.update_status(IncidentStatus.INVESTIGATING)
+            incident.last_error = None
+            agent = self.agents[message.receiver]
+            loop = asyncio.get_running_loop()
+            execution_deadline = loop.time() + self.agent_timeout
+            deadline = asyncio.timeout_at(execution_deadline)
+            async with deadline:
+                # Eager task factories may execute the agent during creation.
+                agent_task = asyncio.create_task(agent.process(message))
+                self._active_agents[incident_id] = agent_task
+                agent_task.add_done_callback(
+                    lambda task: self._agent_finished(incident_id, task)
                 )
-                agent = self.agents[RoleEnum.TRIAGE]
-                loop = asyncio.get_running_loop()
-                execution_deadline = loop.time() + self.agent_timeout
-                deadline = asyncio.timeout_at(execution_deadline)
-                async with deadline:
-                    # Eager task factories may execute the agent during creation.
-                    agent_task = asyncio.create_task(agent.process(message))
-                    self._active_agents[incident_id] = agent_task
-                    agent_task.add_done_callback(
-                        lambda task: self._agent_finished(incident_id, task)
-                    )
-                    # Caller/deadline cancellation interrupts only this wait.
-                    # The agent is cancelled once, outside the execution timer.
-                    await asyncio.wait({agent_task})
-                    result = agent_task.result()
+                # Caller/deadline cancellation interrupts only this wait.
+                # The agent is cancelled once, outside the execution timer.
+                await asyncio.wait({agent_task})
+                result = agent_task.result()
 
-                if caller_was_cancelled():
-                    raise asyncio.CancelledError
-                if deadline.expired() or loop.time() >= execution_deadline:
-                    # Never accept a result after the execution deadline expired.
-                    raise TimeoutError("Agent processing timed out")
+            if caller_was_cancelled():
+                raise asyncio.CancelledError
+            if deadline.expired() or loop.time() >= execution_deadline:
+                # Never accept a result after the execution deadline expired.
+                raise TimeoutError("Agent processing timed out")
 
-                result = self._validate_result(message, result)
-                self._handle_agent_result(incident, result)
+            result = self._validate_result(message, result)
+            self._handle_agent_result(incident, result)
+            return incident.status != IncidentStatus.FAILED
 
-            except asyncio.CancelledError:
-                completed = await self._stop_agent(agent_task)
-                incident.update_status(
-                    IncidentStatus.NEW if completed else IncidentStatus.FAILED
-                )
-                raise
+        except asyncio.CancelledError:
+            completed = await self._stop_agent(agent_task)
+            retryable = completed and stage != StageEnum.REMEDIATION
+            incident.update_status(
+                previous_status if retryable else IncidentStatus.FAILED
+            )
+            incident.last_error = (
+                None
+                if retryable
+                else "Agent cancellation left cleanup or remediation unconfirmed"
+            )
+            raise
 
-            except Exception as exc:
-                cancelled = caller_was_cancelled()
-                completed = await self._stop_agent(agent_task)
-                incident.update_status(
-                    IncidentStatus.NEW if cancelled and completed else IncidentStatus.FAILED
-                )
-                if caller_was_cancelled():
-                    # Cancellation received during cleanup must also propagate.
-                    raise asyncio.CancelledError from exc
-                print(
-                    f"[Orchestrator] Ошибка обработки "
-                    f"{incident_id}: {exc}"
-                )
+        except Exception as exc:
+            cancelled = caller_was_cancelled()
+            completed = await self._stop_agent(agent_task)
+            incident.update_status(
+                previous_status
+                if cancelled and completed and stage != StageEnum.REMEDIATION
+                else IncidentStatus.FAILED
+            )
+            incident.last_error = str(exc) or type(exc).__name__
+            if caller_was_cancelled():
+                # Cancellation received during cleanup must also propagate.
+                raise asyncio.CancelledError from exc
+            print(f"[Orchestrator] Ошибка обработки {incident_id}: {exc}")
+            return False
+
+    @staticmethod
+    def _prepare_message(incident: Incident) -> AgentMessage:
+        config = {
+            StageEnum.TRIAGE: (
+                IncidentStatus.NEW,
+                RoleEnum.TRIAGE,
+                "Выдели ключевые метрики инцидента.",
+            ),
+            StageEnum.DIAGNOSIS: (
+                IncidentStatus.INVESTIGATING,
+                RoleEnum.DIAGNOSTIC,
+                "Определи причину сбоя.",
+            ),
+            StageEnum.REMEDIATION: (
+                IncidentStatus.REMEDIATING,
+                RoleEnum.REMEDIATION,
+                "Выполни исправление по результатам диагностики.",
+            ),
+            StageEnum.VERIFICATION: (
+                IncidentStatus.VERIFYING,
+                RoleEnum.DIAGNOSTIC,
+                "Проверь результат исправления и состояние сервиса.",
+            ),
+        }
+        if incident.next_stage is None:
+            raise ValueError("Non-terminal incident has no pending stage")
+        expected, receiver, description = config[incident.next_stage]
+        if incident.status != expected:
+            raise ValueError("Incident status does not match its next stage")
+        if incident.next_stage in (
+            StageEnum.REMEDIATION,
+            StageEnum.VERIFICATION,
+        ) and not (incident.root_cause and incident.root_cause.strip()):
+            raise ValueError(
+                "A diagnosis is required before remediation or verification"
+            )
+        if incident.next_stage == StageEnum.VERIFICATION and not (
+            incident.action_taken and incident.action_taken.strip()
+        ):
+            raise ValueError("A recorded action is required before verification")
+        return AgentMessage(
+            incident_id=incident.incident_id,
+            receiver=receiver,
+            stage=incident.next_stage,
+            task_description=description,
+            payload={
+                "text": incident.description,
+                "title": incident.title,
+                "metrics": incident.metrics_log,
+                "root_cause": incident.root_cause,
+                "action_taken": incident.action_taken,
+                "history": [item.model_dump(mode="json") for item in incident.history],
+            },
+        )
 
     async def _stop_agent(self, task: asyncio.Task[AgentResult] | None) -> bool:
         """Confirm error-free termination within a separate cleanup deadline."""
@@ -163,7 +240,9 @@ class Orchestrator:
         # An exception during teardown leaves resource release unconfirmed.
         return task.cancelled() or task.exception() is None
 
-    def _agent_finished(self, incident_id: UUID, task: asyncio.Task[AgentResult]) -> None:
+    def _agent_finished(
+        self, incident_id: UUID, task: asyncio.Task[AgentResult]
+    ) -> None:
         if self._active_agents.get(incident_id) is task:
             del self._active_agents[incident_id]
         if not task.cancelled():
@@ -171,9 +250,7 @@ class Orchestrator:
             task.exception()
 
     @staticmethod
-    def _validate_result(
-        message: AgentMessage, result: AgentResult
-    ) -> AgentResult:
+    def _validate_result(message: AgentMessage, result: AgentResult) -> AgentResult:
         if not isinstance(result, AgentResult):
             raise TypeError("Agent result must be an AgentResult")
 
@@ -193,23 +270,50 @@ class Orchestrator:
         if result.receiver != RoleEnum.ORCHESTRATOR:
             raise ValueError("Unexpected result receiver")
 
+        if result.stage != message.stage:
+            raise ValueError("Agent result stage mismatch")
+
         return result
 
     @staticmethod
-    def _handle_agent_result(
-        incident: Incident, result: AgentResult
-    ) -> None:
-        incident.history.append(result)
-
+    def _handle_agent_result(incident: Incident, result: AgentResult) -> None:
         if not result.is_success:
+            incident.history.append(result)
+            incident.last_error = (
+                result.error_message or "Agent reported a failed result"
+            )
             incident.update_status(IncidentStatus.FAILED)
             return
 
-        if result.sender == RoleEnum.TRIAGE:
+        # Validate stage-specific output before committing any history or fields.
+        if result.stage == StageEnum.TRIAGE:
             incident.metrics_log = {**incident.metrics_log, **result.output_data}
-
-            # Successful triage does not mean that the incident is resolved.
-            incident.updated_at = utc_now()
+            incident.next_stage = StageEnum.DIAGNOSIS
+        elif result.stage == StageEnum.DIAGNOSIS:
+            data = DiagnosisData.model_validate(dict(result.output_data))
+            incident.metrics_log = {**incident.metrics_log, **data.metrics}
+            incident.root_cause = data.root_cause
+            incident.update_status(IncidentStatus.REMEDIATING)
+            incident.next_stage = StageEnum.REMEDIATION
+        elif result.stage == StageEnum.REMEDIATION:
+            data = RemediationData.model_validate(dict(result.output_data))
+            incident.metrics_log = {**incident.metrics_log, **data.metrics}
+            incident.action_taken = data.action_taken
+            incident.update_status(IncidentStatus.VERIFYING)
+            incident.next_stage = StageEnum.VERIFICATION
+        elif result.stage == StageEnum.VERIFICATION:
+            data = VerificationData.model_validate(dict(result.output_data))
+            incident.metrics_log = {**incident.metrics_log, **data.metrics}
+            incident.verification = data.model_dump()
+            incident.update_status(
+                IncidentStatus.RESOLVED if data.resolved else IncidentStatus.FAILED
+            )
+            if data.resolved:
+                incident.next_stage = None
+            else:
+                incident.last_error = data.details
+        incident.history.append(result)
+        incident.updated_at = utc_now()
 
 
 async def main() -> None:
@@ -217,14 +321,11 @@ async def main() -> None:
 
     incident = await orchestrator.create_incident(
         title="Alert: DB_TIMEOUT",
-        description=(
-            "Production database is dropping connections "
-            "with timeout 5000ms"
-        ),
+        description=("Production database is dropping connections with timeout 5000ms"),
     )
 
     print(f"Created: {incident.status.value}")
-    await orchestrator.execute_next_step(incident.incident_id)
+    await orchestrator.process_incident(incident.incident_id)
 
     updated = orchestrator.storage[incident.incident_id]
     print(f"Status: {updated.status.value}")

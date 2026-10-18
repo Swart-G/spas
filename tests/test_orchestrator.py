@@ -174,7 +174,7 @@ async def test_unknown_incident_raises_error(orchestrator):
 
 
 @pytest.mark.asyncio
-async def test_repeated_execution_does_not_call_agent_twice(
+async def test_next_execution_advances_to_diagnosis_without_repeating_triage(
     orchestrator, incident
 ):
     agent = SuccessfulAgent()
@@ -184,11 +184,13 @@ async def test_repeated_execution_does_not_call_agent_twice(
     await orchestrator.execute_next_step(incident.incident_id)
 
     assert agent.calls == 1
-    assert len(incident.history) == 1
+    assert len(incident.history) == 2
+    assert incident.root_cause
+    assert incident.status == IncidentStatus.REMEDIATING
 
 
 @pytest.mark.asyncio
-async def test_concurrent_execution_calls_agent_once(
+async def test_concurrent_steps_advance_without_repeating_triage(
     orchestrator, incident
 ):
     class SlowAgent(SuccessfulAgent):
@@ -205,8 +207,8 @@ async def test_concurrent_execution_calls_agent_once(
     )
 
     assert agent.calls == 1
-    assert len(incident.history) == 1
-    assert incident.status == IncidentStatus.INVESTIGATING
+    assert len(incident.history) == 2
+    assert incident.status == IncidentStatus.REMEDIATING
 
 
 @pytest.mark.asyncio

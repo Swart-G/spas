@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from shared.contracts.messages import AgentResult
+from shared.contracts.messages import AgentResult, StageEnum
 from shared.contracts.snapshots import SnapshotData
 from shared.time import utc_now
 
@@ -13,6 +13,7 @@ class IncidentStatus(str, Enum):
     NEW = "new"
     INVESTIGATING = "investigating"
     REMEDIATING = "remediating"
+    VERIFYING = "verifying"
     RESOLVED = "resolved"
     FAILED = "failed"
 
@@ -26,12 +27,15 @@ ALLOWED_TRANSITIONS = {
         # An interrupted triage step can be retried from its initial state.
         IncidentStatus.NEW,
         IncidentStatus.REMEDIATING,
-        IncidentStatus.RESOLVED,
         IncidentStatus.FAILED,
     },
     IncidentStatus.REMEDIATING: {
-        IncidentStatus.RESOLVED,
+        IncidentStatus.VERIFYING,
         IncidentStatus.FAILED,
+    },
+    IncidentStatus.VERIFYING: {
+        IncidentStatus.FAILED,
+        IncidentStatus.RESOLVED,
     },
     IncidentStatus.RESOLVED: set(),
     IncidentStatus.FAILED: set(),
@@ -47,9 +51,12 @@ class Incident(BaseModel):
     title: str
     description: str
     status: IncidentStatus = IncidentStatus.NEW
+    next_stage: StageEnum | None = StageEnum.TRIAGE
     metrics_log: SnapshotData = Field(default_factory=dict, validate_default=True)
     root_cause: str | None = None
     action_taken: str | None = None
+    verification: SnapshotData = Field(default_factory=dict, validate_default=True)
+    last_error: str | None = None
     history: list[AgentResult] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

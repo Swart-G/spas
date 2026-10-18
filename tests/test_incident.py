@@ -34,6 +34,10 @@ def test_valid_status_transition():
     [
         (IncidentStatus.NEW, IncidentStatus.RESOLVED),
         (IncidentStatus.NEW, IncidentStatus.REMEDIATING),
+        (IncidentStatus.INVESTIGATING, IncidentStatus.RESOLVED),
+        (IncidentStatus.REMEDIATING, IncidentStatus.RESOLVED),
+        (IncidentStatus.NEW, IncidentStatus.VERIFYING),
+        (IncidentStatus.VERIFYING, IncidentStatus.REMEDIATING),
         (IncidentStatus.RESOLVED, IncidentStatus.NEW),
         (IncidentStatus.FAILED, IncidentStatus.INVESTIGATING),
     ],
@@ -73,3 +77,15 @@ def test_same_status_transition_is_a_noop():
 
     assert incident.status == IncidentStatus.NEW
     assert incident.updated_at == original_updated_at
+
+
+def test_full_status_transition_path_requires_verification():
+    incident = Incident(title="DB timeout", description="DB timeout")
+    for status in (
+        IncidentStatus.INVESTIGATING,
+        IncidentStatus.REMEDIATING,
+        IncidentStatus.VERIFYING,
+        IncidentStatus.RESOLVED,
+    ):
+        incident.update_status(status)
+        assert incident.status == status

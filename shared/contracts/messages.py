@@ -15,6 +15,13 @@ class RoleEnum(str, Enum):
     REMEDIATION = "remediation_agent"
 
 
+class StageEnum(str, Enum):
+    TRIAGE = "triage"
+    DIAGNOSIS = "diagnosis"
+    REMEDIATION = "remediation"
+    VERIFICATION = "verification"
+
+
 class AgentMessage(BaseModel):
     """Command sent by the orchestrator to an agent."""
 
@@ -24,6 +31,7 @@ class AgentMessage(BaseModel):
     incident_id: UUID
     sender: RoleEnum = RoleEnum.ORCHESTRATOR
     receiver: RoleEnum
+    stage: StageEnum = StageEnum.TRIAGE
     task_description: str
     payload: SnapshotData = Field(default_factory=dict, validate_default=True)
     timestamp: datetime = Field(default_factory=utc_now)
@@ -39,6 +47,7 @@ class AgentResult(BaseModel):
     incident_id: UUID
     sender: RoleEnum
     receiver: RoleEnum = RoleEnum.ORCHESTRATOR
+    stage: StageEnum = StageEnum.TRIAGE
     is_success: bool
     output_data: SnapshotData = Field(default_factory=dict, validate_default=True)
     error_message: str | None = None
