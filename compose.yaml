@@ -1,0 +1,49 @@
+name: spas
+
+x-gateway-image: &gateway-image
+  image: spas-llm:local
+  build:
+    context: .
+    dockerfile: llm/gateway/Dockerfile
+
+x-gateway-state: &gateway-state
+  volumes:
+    - llm-state:/home/spas/.local/state/spas/llm
+
+services:
+  gateway-init:
+    <<: [*gateway-image, *gateway-state]
+    command: ["init"]
+    restart: "no"
+
+  gateway:
+    <<: [*gateway-image, *gateway-state]
+    depends_on:
+      gateway-init:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8008:8008"
+    restart: unless-stopped
+    init: true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8008/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # The browser and OAuth callback must share the Linux host's loopback network.
+  tui:
+    <<: [*gateway-image, *gateway-state]
+    profiles: ["tools"]
+    depends_on:
+      gateway-init:
+        condition: service_completed_successfully
+    network_mode: host
+    command: ["tui"]
+    init: true
+    stdin_open: true
+    tty: true
+
+volumes:
+  llm-state:

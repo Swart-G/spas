@@ -1,6 +1,6 @@
 # Интеграция со SPAS LLM Gateway
 
-Проверенный reference commit: `2968247a5bed416054a66bd08ef18589f77230ed`.
+Проверенный reference commit: `d311eedf6e75d1adcbe6668101e6bc69a1ed4734`.
 Endpoint: `POST /v1/chat/completions`, обязательный `Authorization: Bearer <client key>`.
 Запрос: логический `model`, system/user messages, `temperature=0.0`, `max_tokens=128`,
 `stream=false`, `n=1`. Только классификатор задаёт параметры; HTTP-клиент Analyzer

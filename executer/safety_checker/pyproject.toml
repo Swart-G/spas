@@ -13,7 +13,7 @@ dependencies = [
 [dependency-groups]
 dev = ["pytest>=8.3,<9", "pytest-asyncio>=0.25,<1", "ruff>=0.9,<1"]
 integration = [
-  "spas-llm-gateway @ git+https://github.com/Swart-G/spas.git@2968247a5bed416054a66bd08ef18589f77230ed",
+  "spas-llm-gateway @ git+https://github.com/Swart-G/spas.git@d311eedf6e75d1adcbe6668101e6bc69a1ed4734",
   "mcp==2.2.0",
 ]
 

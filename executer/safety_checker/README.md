@@ -14,7 +14,7 @@ Rule-Based Checker выполняется перед LLM; запреты и за
 адаптер LLM Gateway, JSON-логирование без содержимого запросов, датасет, offline и
 опциональные live-тесты, оценка стабильности/false allow и контейнеризация.
 
-Совместимость проверяется с [SPAS Gateway](https://github.com/Swart-G/spas/tree/2968247a5bed416054a66bd08ef18589f77230ed)
+Совместимость проверяется с [SPAS Gateway](https://github.com/Swart-G/spas/tree/d311eedf6e75d1adcbe6668101e6bc69a1ed4734)
 через его настоящий HTTP API и `RemoteInferenceAdapter` с подменённым inference.
 Gateway уже поддерживает текст; изменений в SPAS для текущего контракта не требуется.
 Адаптер не запрашивает неподдерживаемый `json_schema`.
