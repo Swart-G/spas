@@ -58,6 +58,7 @@ class ChatRequest(BaseModel):
 class Capabilities:
     chat: bool = True
     decisions: bool = False
+    decision_box: bool = False
     streaming: bool = True
     json_output: bool = False
     tool_calling: bool = False
@@ -90,7 +91,7 @@ class Capabilities:
             unsupported.append("response_format")
         if unsupported:
             raise GatewayError(
-                f"Выбранный backend не поддерживает: {', '.join(unsupported)}.",
+                f"Подключение не поддерживает параметры: {', '.join(unsupported)}.",
                 code="unsupported_parameter",
                 status=400,
                 param=unsupported[0],

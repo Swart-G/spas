@@ -26,10 +26,10 @@ def vm_time(record, *, now=None):
 def time_label(record):
     data = vm_time(record)
     if data["expired"]:
-        return "VM завершена"
+        return "Среда завершена"
     remaining = data["remaining_seconds"]
     if remaining is None:
         return "Неизвестно"
     if remaining == 0:
-        return "Оценочный лимит достигнут"
-    return f"≈ {remaining // 3600}ч {(remaining % 3600) // 60}м"
+        return "Расчётное время истекло"
+    return f"≈ {remaining // 3600} ч {(remaining % 3600) // 60} мин"

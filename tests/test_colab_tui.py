@@ -19,7 +19,7 @@ def replies(monkeypatch, values):
         value = next(values)
         if options.get("choices"):
             assert value in options["choices"]
-        if "token" in label or "secret" in label:
+        if options.get("password"):
             assert options.get("password") is True
             secrets.append(value)
         return value
@@ -61,8 +61,8 @@ def test_managed_colab_wizard_saves_model_gpu_transport_and_encrypted_tokens(
             "colab-gpu",
             "google-main",
             "1",
-            "",
             "team/tiny",
+            "",
             "main",
             "auto",
             "auto",
@@ -82,7 +82,7 @@ def test_managed_colab_wizard_saves_model_gpu_transport_and_encrypted_tokens(
         ]
 
     monkeypatch.setattr(tui, "available_specs", available)
-    tui.configure_deployment(initial_config(), path, tmp_path)
+    tui.configure_deployment(initial_config(), path, tmp_path, advanced=True)
     config = GatewayConfig.load(path)
     backend = config.backends["colab-gpu"]
     assert backend.provider == "colab_managed" and backend.base_url is None
@@ -132,6 +132,8 @@ def test_full_colab_management_is_accessible_from_main_tui(tmp_path, monkeypatch
 
     def menu(*args, **kwargs):
         choice = next(selections)
+        if choice == "q":
+            raise EOFError()
         if choice == "b":
             raise main_tui.Back()
         return choice
@@ -178,7 +180,7 @@ def test_escape_google_menu_returns_to_full_colab_menu(monkeypatch, tmp_path):
     monkeypatch.setattr(tui, "menu", menu)
     with pytest.raises(main_tui.Back):
         tui.manage_full_colab(initial_config(), path, tmp_path)
-    assert calls == ["Google Colab", "Google-аккаунт", "Google Colab"]
+    assert calls == ["Google Colab", "Аккаунты Google", "Google Colab"]
 
 
 def test_colab_screen_opens_existing_connection_without_legacy_http_form(

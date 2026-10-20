@@ -135,7 +135,10 @@ class ColabCLIAPI:
 
     async def create(self, account, spec, runtime_id, request_id, version=""):
         if version:
-            raise GatewayError("Colab CLI использует актуальный образ; уберите версию runtime.")
+            raise GatewayError(
+                "При стандартном входе Colab выбирает актуальный образ среды. "
+                "Оставьте версию образа пустой."
+            )
         name = "runtimes/" + runtime_id
         assignment = await self.call(
             account, lambda client: client.assign(self.notebook(name), **self.options(spec))
@@ -152,7 +155,11 @@ class ColabCLIAPI:
         )
         # This is a GET only: it never posts an assignment when a runtime expired.
         if isinstance(assignment, GetAssignmentResponse):
-            raise GatewayError("Runtime Colab истёк.", code="colab_runtime_missing", status=404)
+            raise GatewayError(
+                "Среда Colab завершила работу. Запустите модель заново.",
+                code="colab_runtime_missing",
+                status=404,
+            )
         return self.runtime(runtime, assignment)
 
     async def delete(self, account, runtime):

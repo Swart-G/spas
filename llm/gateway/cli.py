@@ -1,10 +1,12 @@
 import argparse
 import asyncio
+import fcntl
 import getpass
 import json
 import os
 import secrets
 import sys
+from collections.abc import Callable
 from contextlib import aclosing
 from pathlib import Path
 
@@ -22,6 +24,14 @@ from .core.errors import GatewayError
 from .core.models import ChatRequest
 from .core.router import Router
 from .main import GatewayKeys, make_registry
+from .presentation import (
+    AUTH_STATES,
+    PROVIDERS,
+    safe_terminal_text,
+    show_models,
+    show_status,
+    show_usage,
+)
 
 console = Console(highlight=False, style="bright_white")
 
@@ -40,10 +50,18 @@ def initial_config() -> GatewayConfig:
     )
 
 
-def save_config(config: GatewayConfig, path: Path) -> None:
+def save_config(
+    config: GatewayConfig,
+    path: Path,
+    *,
+    expected: GatewayConfig | None = None,
+    before_write: Callable[[], None] | None = None,
+) -> None:
     lines = [
-        "# СПАС LLM Gateway; credentials live in the encrypted account store.",
+        "# СПАС — шлюз моделей. Данные доступа хранятся отдельно в зашифрованном хранилище.",
         "fallback_on = " + json.dumps(config.fallback_on),
+        "",
+        "[backends]",
         "",
     ]
     for name, backend in config.backends.items():
@@ -57,7 +75,48 @@ def save_config(config: GatewayConfig, path: Path) -> None:
     for alias, backends in config.routes.items():
         lines.append(json.dumps(alias) + " = " + json.dumps(backends))
     path.parent.mkdir(parents=True, exist_ok=True)
-    CredentialStore._atomic_write(path, ("\n".join(lines) + "\n").encode())
+    lock_path = path.with_name("." + path.name + ".lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        if expected is not None:
+            try:
+                current = GatewayConfig.load(path)
+            except (FileNotFoundError, ValueError):
+                current = None
+            if current != expected:
+                raise GatewayError(
+                    "Настройки изменены в другом окне. Повторите действие.",
+                    code="config_changed",
+                    status=409,
+                )
+        if before_write is not None:
+            before_write()
+        CredentialStore._atomic_write(path, ("\n".join(lines) + "\n").encode())
+    finally:
+        os.close(fd)
+
+
+async def apply_gateway(state_dir: Path):
+    keys = GatewayKeys.load(CredentialStore(state_dir))
+    if not keys.admin:
+        raise GatewayError("Не настроен ключ администратора шлюза.")
+    url = os.environ.get("SPAS_GATEWAY_URL", "http://127.0.0.1:8008").rstrip("/")
+    try:
+        async with httpx.AsyncClient(follow_redirects=False) as client:
+            response = await client.post(
+                url + "/admin/reload", headers={"Authorization": "Bearer " + keys.admin}
+            )
+        if response.status_code == 409:
+            raise GatewayError("Подключение занято запросом. Повторите применение настроек.")
+        if response.status_code != 200:
+            raise GatewayError(
+                "Шлюз не применил настройки. Проверьте его доступность и ключ администратора."
+            )
+    except httpx.HTTPError as error:
+        raise GatewayError(
+            "Шлюз недоступен. Настройки сохранены; повторите применение после его запуска."
+        ) from error
 
 
 def initialize(state_dir: Path, config_path: Path) -> None:
@@ -71,16 +130,16 @@ def initialize(state_dir: Path, config_path: Path) -> None:
     if not config_path.exists():
         save_config(initial_config(), config_path)
     console.print(f"Конфигурация: {config_path}", markup=False)
-    console.print("Настройка аккаунтов и проверки: SPAS TUI (docker compose run --rm tui).")
+    console.print("Откройте интерфейс СПАС: docker compose run --rm tui.")
 
 
 def print_accounts(auth: AuthManager) -> None:
-    table = Table("Аккаунт", "Провайдер", "Состояние", "Подписка")
+    table = Table("Аккаунт", "Сервис", "Состояние", "Подписка")
     for record in auth.accounts():
         table.add_row(
             record["account"],
-            record["provider"],
-            record["state"],
+            PROVIDERS.get(record["provider"], "Другой сервис"),
+            AUTH_STATES.get(record["state"], "Нет данных"),
             record.get("subscription_type") or "—",
         )
     console.print(table)
@@ -110,37 +169,60 @@ async def perform(args, config_path: Path, state_dir: Path) -> None:
                 )
             else:
                 result = await profiles.login(args.account)
-            console.print(f"{result['account']}: {result['state']}", markup=False)
+            console.print(
+                f"{result['account']}: {AUTH_STATES.get(result['state'], 'Нет данных')}",
+                markup=False,
+            )
         elif args.command == "import-claude":
             result = await profiles.import_profile(args.account, args.source)
             console.print(
-                f"{result['account']}: {result['state']}. "
-                "Выполните запрос в разделе Проверка SPAS TUI.",
+                f"{result['account']}: {AUTH_STATES.get(result['state'], 'Нет данных')}. "
+                "Проверьте ответ модели в главном меню: «Тестирование».",
                 markup=False,
             )
         elif args.command == "logout":
             revoked = await auth.logout(args.account)
-            console.print("Локальные credentials удалены.")
+            console.print("Сохранённый доступ удалён с этого устройства.")
             if not revoked:
                 console.print(
-                    "Удалённый отзыв не подтверждён. Отключите приложение в настройках ChatGPT."
+                    "Чтобы завершить выход из ChatGPT, отзовите доступ приложения "
+                    "в настройках аккаунта."
                 )
         elif args.command == "api-key":
-            await auth.save_api_key(args.account, getpass.getpass("OpenAI API key: "))
-            console.print("API-ключ сохранён в зашифрованном виде.")
+            await auth.save_api_key(
+                args.account,
+                "" if args.no_auth else getpass.getpass("API-ключ: "),
+                provider=args.provider,
+                no_auth=args.no_auth,
+            )
+            console.print("Доступ к API сохранён.")
         elif args.command in {"models", "probe", "status", "decide"}:
             config = GatewayConfig.load(config_path)
             registry = make_registry(config, auth, client)
             if args.command in {"models", "status"}:
                 if args.backend not in registry.backends:
-                    raise GatewayError("Backend не найден.", code="model_not_found", status=404)
+                    raise GatewayError(
+                        "Подключение не найдено. Проверьте его название.",
+                        code="model_not_found",
+                        status=404,
+                    )
                 provider = registry.backends[args.backend].provider
                 data = (
                     await provider.list_models()
                     if args.command == "models"
                     else await provider.health()
                 )
-                console.print(json.dumps(data, ensure_ascii=False, indent=2), markup=False)
+                if getattr(args, "pretty", False):
+                    if args.command == "models":
+                        show_models(
+                            console,
+                            data,
+                            decision=registry.backends[args.backend].config.decision_model,
+                        )
+                    else:
+                        show_status(console, data)
+                else:
+                    console.print(json.dumps(data, ensure_ascii=False, indent=2), markup=False)
                 return
             alias = args.backend
             if alias in config.backends:
@@ -158,7 +240,7 @@ async def perform(args, config_path: Path, state_dir: Path) -> None:
             try:
                 router = Router(registry, auth, audit)
                 if args.command == "decide" or registry.capabilities(alias).decisions:
-                    from .core.decisions import DecisionRequest
+                    from .core.system_one import parse_decision
 
                     payload = (
                         args.payload
@@ -166,11 +248,11 @@ async def perform(args, config_path: Path, state_dir: Path) -> None:
                         else json.loads(args.input.read_text())
                         if args.command == "decide"
                         else {
-                            "context": args.prompt,
-                            "schema": {
+                            "state": args.prompt,
+                            "questions": {
                                 "incident": {
-                                    "type": "boolean",
-                                    "description": "Does the text describe a failure?",
+                                    "type": "noul",
+                                    "instructions": "Does the text describe a failure?",
                                 }
                             },
                         }
@@ -178,70 +260,88 @@ async def perform(args, config_path: Path, state_dir: Path) -> None:
                     if not isinstance(payload, dict):
                         raise GatewayError("JSON решения должен быть объектом.", status=400)
                     payload["model"] = alias
-                    result = await router.decide(
-                        DecisionRequest.model_validate(payload), "cli-decision"
-                    )
-                    console.print(json.dumps(result, ensure_ascii=False, indent=2), markup=False)
+                    result = await router.decide(parse_decision(payload), "cli-decision")
+                    if getattr(args, "pretty", False):
+                        from .decision_tui import show_result
+
+                        show_result(result)
+                    else:
+                        console.print(
+                            json.dumps(result, ensure_ascii=False, indent=2), markup=False
+                        )
                 elif args.stream:
-                    async with aclosing(router.stream(request, "cli-probe")) as events:
-                        async for event in events:
-                            if event.kind == "delta":
-                                console.print(event.text, end="", markup=False)
-                    console.print()
+                    try:
+                        async with aclosing(router.stream(request, "cli-probe")) as events:
+                            async for event in events:
+                                if event.kind == "delta":
+                                    console.print(
+                                        safe_terminal_text(event.text), end="", markup=False
+                                    )
+                    finally:
+                        console.print()
                 else:
                     result = await router.generate(request, "cli-probe")
-                    console.print(result.content, markup=False)
+                    console.print(safe_terminal_text(result.content), markup=False)
                     if result.usage:
-                        console.print(json.dumps(result.usage.as_dict()), markup=False)
+                        if getattr(args, "pretty", False):
+                            show_usage(console, result.usage.as_dict())
+                        else:
+                            console.print(json.dumps(result.usage.as_dict()), markup=False)
             finally:
                 audit.close()
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(description="СПАС LLM Gateway")
+    root = argparse.ArgumentParser(description="СПАС — шлюз моделей")
     root.add_argument("--state-dir", type=Path, default=default_state_dir())
     root.add_argument("--config", type=Path, default=os.environ.get("SPAS_GATEWAY_CONFIG"))
     commands = root.add_subparsers(dest="command", required=True)
-    commands.add_parser("init", help="Create local configuration and gateway keys")
-    commands.add_parser("accounts", help="List accounts without revealing credentials")
-    terminal = commands.add_parser("colab-terminal", help="Open an interactive Colab terminal")
+    commands.add_parser("init", help="Создать настройки и ключи шлюза")
+    commands.add_parser("accounts", help="Показать подключённые аккаунты")
+    terminal = commands.add_parser("colab-terminal", help="Открыть терминал Colab")
     terminal.add_argument("backend")
-    login = commands.add_parser("login", help="Authorize a subscription account")
+    login = commands.add_parser("login", help="Подключить аккаунт с подпиской")
     login.add_argument("provider", choices=["chatgpt", "claude"])
     login.add_argument("account")
     login.add_argument(
-        "--consent", action="store_true", help="Explicitly request ChatGPT plan consent again"
+        "--consent",
+        action="store_true",
+        help="Повторно запросить разрешение на доступ к подписке ChatGPT",
     )
-    imported = commands.add_parser(
-        "import-claude", help="Encrypt a copy of a native Claude profile"
-    )
+    imported = commands.add_parser("import-claude", help="Импортировать профиль Claude")
     imported.add_argument("account")
     imported.add_argument("--source", type=Path, default=Path.home() / ".claude")
     for command in ("logout", "api-key"):
         item = commands.add_parser(command)
         item.add_argument("account")
-    keys = commands.add_parser("key", help="Print a gateway key for a local client")
+        if command == "api-key":
+            item.add_argument(
+                "--provider", choices=["openai_compatible", "openai_api"], default="openai_api"
+            )
+            item.add_argument("--no-auth", action="store_true", help="Подключиться к API без ключа")
+    keys = commands.add_parser("key", help="Показать ключ доступа к шлюзу")
     keys.add_argument("--admin", action="store_true")
-    models = commands.add_parser("models", help="Fetch the provider model catalog")
+    models = commands.add_parser("models", help="Показать каталог моделей сервиса")
     models.add_argument("backend")
-    status = commands.add_parser("status", help="Check backend availability without inference")
+    status = commands.add_parser("status", help="Проверить состояние подключения")
     status.add_argument("backend")
-    probe = commands.add_parser("probe", help="Run one real inference request")
-    probe.add_argument("backend", help="Backend name or logical model alias")
+    probe = commands.add_parser("probe", help="Отправить проверочный запрос модели")
+    probe.add_argument("backend", help="Название подключения или имя модели в шлюзе")
     probe.add_argument("--prompt", default="Ответь ровно одним словом: СПАС")
     probe.add_argument("--stream", action="store_true")
-    decide = commands.add_parser("decide", help="Score bounded enum/boolean fields")
-    decide.add_argument("backend", help="Backend name or logical model alias")
-    decide.add_argument("--input", type=Path, required=True, help="JSON with context and schema")
-    route = commands.add_parser("route", help="Set a model route and explicit fallbacks")
+    decide = commands.add_parser("decide", help="Отправить запрос модели решений")
+    decide.add_argument("backend", help="Название подключения или имя модели в шлюзе")
+    decide.add_argument("--input", type=Path, required=True, help="Путь к JSON-файлу запроса")
+    decide.add_argument("--pretty", action="store_true", help="Показать результат в удобном виде")
+    route = commands.add_parser("route", help="Настроить маршрут и резервные подключения")
     route.add_argument("alias")
     route.add_argument("backends", nargs="+")
-    model = commands.add_parser("set-model", help="Choose the provider model and Claude transport")
+    model = commands.add_parser("set-model", help="Выбрать модель и способ подключения к Claude")
     model.add_argument("backend")
     model.add_argument("model")
     model.add_argument("--transport", choices=["cli", "sdk"])
-    commands.add_parser("tui", help="Interactive account, model, routing and log management")
-    serve = commands.add_parser("serve", help="Start the local OpenAI-compatible gateway")
+    commands.add_parser("tui", help="Открыть интерфейс СПАС")
+    serve = commands.add_parser("serve", help="Запустить шлюз моделей")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8008)
     return root
@@ -264,18 +364,18 @@ def main() -> None:
             config = GatewayConfig.load(config_path)
             updated = config.model_dump()
             updated["routes"][args.alias] = args.backends
-            save_config(GatewayConfig.model_validate(updated), config_path)
-            console.print("Маршрут сохранён. Перезапустите Gateway.")
+            save_config(GatewayConfig.model_validate(updated), config_path, expected=config)
+            console.print("Маршрут сохранён. Перезапустите шлюз, чтобы применить изменения.")
         elif args.command == "set-model":
             config = GatewayConfig.load(config_path)
             if args.backend not in config.backends:
-                raise GatewayError("Backend не найден.")
+                raise GatewayError("Подключение не найдено. Проверьте его название.")
             updated = config.model_dump()
             updated["backends"][args.backend]["model"] = args.model
             if args.transport:
                 updated["backends"][args.backend]["transport"] = args.transport
-            save_config(GatewayConfig.model_validate(updated), config_path)
-            console.print("Модель сохранена. Перезапустите Gateway.")
+            save_config(GatewayConfig.model_validate(updated), config_path, expected=config)
+            console.print("Модель сохранена. Перезапустите шлюз, чтобы применить изменения.")
         elif args.command == "serve":
             import uvicorn
 

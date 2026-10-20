@@ -32,6 +32,7 @@ packages = ["llm"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+required_plugins = ["pytest-asyncio>=0.25,<2"]
 testpaths = ["tests"]
 
 [tool.ruff]

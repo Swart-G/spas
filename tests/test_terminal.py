@@ -64,9 +64,25 @@ def test_text_default_and_password_input():
         assert input_text("Ключ", password=True) == "secret"
 
 
+@pytest.mark.parametrize("default", ["", "Existing model"])
+def test_ctrl_d_closes_text_input_even_with_a_default(default):
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+        pipe.send_text("\x04")
+        with pytest.raises(EOFError):
+            input_text("Модель", default=default)
+
+
 def test_numeric_input_validation_keeps_form_open():
     validator = Validator.from_callable(str.isdigit, error_message="Введите число")
     with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
         # Invalid Enter must keep the form open; replace the text and retry.
         pipe.send_text("oops\r\x01\x0b12\r")
         assert input_text("Количество", validator=validator) == "12"
+
+
+def test_invalid_numbers_keep_the_field_open():
+    from llm.gateway.tui import number
+
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+        pipe.send_text("nan\r\x01\x0binf\r\x01\x0b0\r\x01\x0b33\r\x01\x0b2\r")
+        assert number("Запросы", default=1, minimum=1, maximum=32) == 2

@@ -46,13 +46,18 @@ class JupyterBridge:
                     code="colab_connection_expired",
                 )
             if not 200 <= response.status_code < 300:
-                raise GatewayError("Jupyter runtime недоступен.", code="provider_unavailable")
+                raise GatewayError(
+                    "Среда Colab недоступна. Проверьте её состояние и подключение к сети.",
+                    code="provider_unavailable",
+                )
             data = response.json() if response.content else {}
             if not isinstance(data, dict):
                 raise ValueError("Invalid Jupyter response")
             return data
         except (httpx.HTTPError, ValueError) as error:
-            raise GatewayError("Не удалось подключиться к Jupyter runtime.") from error
+            raise GatewayError(
+                "Не удалось подключиться к среде Colab. Повторите попытку."
+            ) from error
 
     async def execute(self, code: str, *, wait_seconds=1800) -> AsyncIterator[dict]:
         kernel = await self.request("POST", "/api/kernels", json={"name": "python3"})
@@ -136,7 +141,7 @@ class JupyterBridge:
                         ):
                             # Python tracebacks may contain request data or credentials.
                             raise GatewayError(
-                                "Выполнение на runtime завершилось ошибкой.",
+                                "Не удалось выполнить команду в среде Colab.",
                                 code="colab_execution_failed",
                             )
                         if kind in {"display_data", "execute_result"}:
@@ -144,7 +149,9 @@ class JupyterBridge:
                             if event is not None:
                                 if not isinstance(event, dict):
                                     raise GatewayError(
-                                        "Неверный ответ runtime.", code="colab_invalid_response"
+                                        "Среда Colab вернула некорректный ответ. "
+                                        "Повторите попытку.",
+                                        code="colab_invalid_response",
                                     )
                                 yield event
                         elif kind == "execute_reply":

@@ -218,7 +218,8 @@ class ChatGPTOAuth:
             TypeError,
         ) as error:
             raise GatewayError(
-                f"Не удалось проверить ID token {self.identity_provider}.", code="invalid_identity"
+                f"Не удалось проверить токен авторизации {self.identity_provider}.",
+                code="invalid_identity",
             ) from error
 
     async def revoke(self, client_id: str, refresh_token: str) -> None:

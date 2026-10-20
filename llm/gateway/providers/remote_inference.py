@@ -7,13 +7,23 @@ import httpx
 
 from ..auth.manager import AuthManager
 from ..config import BackendConfig
-from ..core.errors import GatewayError, upstream_error
+from ..core.errors import GatewayError, upstream_payload_error
 from ..core.models import Capabilities, ChatRequest, StreamEvent, Usage
 from .base import LLMProvider
 
 
 def invalid_response() -> GatewayError:
     return GatewayError("Удалённый сервер вернул неверный формат ответа.", status=502)
+
+
+def validated_text(value) -> str:
+    if not isinstance(value, str):
+        raise invalid_response()
+    try:
+        value.encode("utf-8")
+    except UnicodeError as error:
+        raise invalid_response() from error
+    return value
 
 
 def chat_usage(data: dict) -> Usage | None:
@@ -90,14 +100,21 @@ class RemoteInferenceAdapter(LLMProvider):
                 follow_redirects=False,
             )
             await self._check_response(response)
-            return response.json()
+            data = response.json()
+            if not isinstance(data, dict):
+                raise invalid_response()
+            if data.get("error") is not None:
+                raise upstream_payload_error(
+                    data["error"], retry_after=response.headers.get("retry-after")
+                )
+            return data
         except httpx.TimeoutException as error:
             raise GatewayError(
                 "Удалённый сервер не ответил вовремя.", code="provider_timeout", status=504
             ) from error
         except httpx.HTTPError as error:
             raise GatewayError(
-                "Удалённый сервер недоступен. Проверьте runtime и URL Colab."
+                "Сервер API недоступен. Проверьте адрес и доступность сервера."
             ) from error
         except ValueError as error:
             raise invalid_response() from error
@@ -105,7 +122,10 @@ class RemoteInferenceAdapter(LLMProvider):
     def _headers(self) -> dict[str, str]:
         record = self.auth.require_account(self.config.account, "remote_inference")
         if record.get("state") == "REAUTH_REQUIRED":
-            raise GatewayError("Обновите ключ сервера в SPAS TUI → Colab.", code="reauth_required")
+            raise GatewayError(
+                "Ключ сервера недействителен. Обновите доступ в настройках подключения.",
+                code="reauth_required",
+            )
         key = record.get("api_key")
         return {"Authorization": "Bearer " + key} if key else {}
 
@@ -121,18 +141,33 @@ class RemoteInferenceAdapter(LLMProvider):
         return payload
 
     async def _check_response(self, response: httpx.Response) -> None:
-        if not 200 <= response.status_code < 300:
-            await response.aread()
-            raise upstream_error(
-                response.status_code, retry_after=response.headers.get("retry-after")
-            )
+        successful = 200 <= response.status_code < 300
+        if successful:
+            media_type = response.headers.get("content-type", "").partition(";")[0].strip().lower()
+            if media_type == "application/json" or media_type.endswith("+json"):
+                await response.aread()
+                body = response.json()
+                if isinstance(body, dict) and body.get("error") is not None:
+                    raise upstream_payload_error(
+                        body["error"], retry_after=response.headers.get("retry-after")
+                    )
+            return
+        await response.aread()
+        error = {}
+        try:
+            body = response.json()
+            if isinstance(body, dict):
+                error = body.get("error", body)
+        except ValueError:
+            pass
+        raise upstream_payload_error(
+            error, status=response.status_code, retry_after=response.headers.get("retry-after")
+        )
 
     @staticmethod
-    def _choices(data: dict) -> list[dict]:
-        if data.get("error"):
-            error = data["error"]
-            code = error.get("code", "") if isinstance(error, dict) else ""
-            raise upstream_error(429 if code in {"rate_limit", "rate_limit_exceeded"} else 503)
+    def _choices(data: dict, retry_after: str | None = None) -> list[dict]:
+        if data.get("error") is not None:
+            raise upstream_payload_error(data["error"], retry_after=retry_after)
         choices = data.get("choices")
         if not isinstance(choices, list) or len(choices) > 1:
             raise invalid_response()
@@ -141,7 +176,7 @@ class RemoteInferenceAdapter(LLMProvider):
         return choices
 
     @staticmethod
-    def _text(message: dict) -> str:
+    def _message_parts(message: dict) -> tuple[str, bool]:
         if not isinstance(message, dict):
             raise invalid_response()
         if message.get("tool_calls") or message.get("function_call"):
@@ -149,18 +184,16 @@ class RemoteInferenceAdapter(LLMProvider):
                 "Сервер запросил инструмент.", code="unexpected_tool_call", status=502
             )
         text = message.get("content")
-        if text is None:
-            return ""
-        if not isinstance(text, str):
-            raise invalid_response()
-        return text
+        refusal = message.get("refusal")
+        parts = [validated_text(value) for value in (text, refusal) if value is not None]
+        return "".join(parts), refusal is not None
 
     async def stream(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:
         payload, headers = self._payload(request), self._headers()
         try:
             async with self.client.stream(
                 "POST",
-                self.config.base_url + "/chat/completions",
+                self.config.api_base_url + "/chat/completions",
                 json=payload,
                 headers=headers,
                 timeout=self.config.timeout_seconds,
@@ -172,19 +205,22 @@ class RemoteInferenceAdapter(LLMProvider):
                     data = response.json()
                     if not isinstance(data, dict):
                         raise invalid_response()
-                    choices = self._choices(data)
+                    choices = self._choices(data, response.headers.get("retry-after"))
                     if not choices:
                         raise invalid_response()
                     choice = choices[0]
                     reason = finish_reason(choice.get("finish_reason"))
-                    text = self._text(choice.get("message"))
+                    text, refused = self._message_parts(choice.get("message"))
                     usage = chat_usage(data)
                     if text:
                         yield StreamEvent("delta", text=text)
-                    yield StreamEvent("done", usage=usage, finish_reason=reason)
+                    yield StreamEvent(
+                        "done", usage=usage, finish_reason="content_filter" if refused else reason
+                    )
                     return
                 terminal = None
                 usage = None
+                refused = False
                 async for data in chat_frames(response):
                     if data is None:
                         if terminal is None:
@@ -193,18 +229,26 @@ class RemoteInferenceAdapter(LLMProvider):
                                 code="provider_incomplete",
                                 status=502,
                             )
-                        yield StreamEvent("done", usage=usage, finish_reason=terminal)
+                        yield StreamEvent(
+                            "done",
+                            usage=usage,
+                            finish_reason="content_filter" if refused else terminal,
+                        )
                         return
-                    choices = self._choices(data)
+                    choices = self._choices(data, response.headers.get("retry-after"))
                     current_usage = chat_usage(data)
                     if current_usage is not None:
                         usage = current_usage
                     if choices:
                         choice = choices[0]
-                        text = self._text(choice.get("delta", {}))
-                        if terminal is not None:
-                            raise invalid_response()
+                        text, part_refused = self._message_parts(choice.get("delta", {}))
                         reason = choice.get("finish_reason")
+                        if terminal is not None:
+                            # OpenRouter repeats the terminal choice in its usage frame.
+                            if text or current_usage is None or reason not in {None, terminal}:
+                                raise invalid_response()
+                            continue
+                        refused |= part_refused
                         if reason is not None:
                             terminal = finish_reason(reason)
                         if text:
@@ -215,7 +259,7 @@ class RemoteInferenceAdapter(LLMProvider):
             ) from error
         except httpx.HTTPError as error:
             raise GatewayError(
-                "Удалённый сервер недоступен. Проверьте runtime и URL Colab."
+                "Сервер API недоступен. Проверьте адрес и доступность сервера."
             ) from error
         except (ValueError, KeyError, TypeError, AttributeError) as error:
             raise invalid_response() from error
@@ -223,13 +267,20 @@ class RemoteInferenceAdapter(LLMProvider):
     async def list_models(self) -> list[dict[str, str]]:
         try:
             response = await self.client.get(
-                self.config.base_url + "/models",
+                self.config.models_url,
                 headers=self._headers(),
                 timeout=min(self.config.timeout_seconds, 10),
                 follow_redirects=False,
             )
             await self._check_response(response)
-            data = response.json()["data"]
+            body = response.json()
+            if not isinstance(body, dict):
+                raise invalid_response()
+            if body.get("error") is not None:
+                raise upstream_payload_error(
+                    body["error"], retry_after=response.headers.get("retry-after")
+                )
+            data = body["data"]
             if not isinstance(data, list) or any(
                 not isinstance(model, dict)
                 or not isinstance(model.get("id"), str)
@@ -242,7 +293,7 @@ class RemoteInferenceAdapter(LLMProvider):
             await self.auth.note_result(self.config.account, error)
             raise
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
-            public = GatewayError("Каталог сервера недоступен. Проверьте runtime и URL Colab.")
+            public = GatewayError("Каталог моделей недоступен. Проверьте адрес сервера API.")
             await self.auth.note_result(self.config.account, public)
             raise public from error
         await self.auth.note_result(self.config.account)
@@ -251,7 +302,7 @@ class RemoteInferenceAdapter(LLMProvider):
     async def health(self) -> dict:
         try:
             models = await self.list_models()
-            record = self.auth.require_account(self.config.account, "remote_inference")
+            record = self.auth.require_account(self.config.account, self.config.provider)
             return {
                 **self.auth.public_account(record),
                 "available": True,

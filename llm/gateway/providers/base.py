@@ -19,7 +19,7 @@ class LLMProvider(ABC):
                 else:
                     terminal = event
         if terminal is None:
-            raise GatewayError("Поток провайдера завершился без подтверждения результата.")
+            raise GatewayError("Соединение закрыто до завершения ответа. Повторите запрос.")
         return Generation("".join(parts), terminal.usage, terminal.finish_reason)
 
     @abstractmethod
