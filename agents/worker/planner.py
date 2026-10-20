@@ -14,12 +14,25 @@ if TYPE_CHECKING:
     import httpx
 
 
+MAX_PLAN_SUMMARY_CHARS = 1000
+MAX_PLAN_STEPS = 8
+MAX_PLAN_STEP_CHARS = 500
+# A non-BMP character can become two \uXXXX escapes (12 ASCII bytes) in
+# the plan JSON. Embedding that JSON in message.content escapes both
+# backslashes again: at most 14 bytes per original character. Reserve
+# another 16 KiB for JSON structure, formatting and Gateway metadata.
+# Excessive whitespace/metadata is deliberately still bounded.
+MAX_GATEWAY_RESPONSE_BYTES = (
+    14 * (MAX_PLAN_SUMMARY_CHARS + MAX_PLAN_STEPS * MAX_PLAN_STEP_CHARS) + 16 * 1024
+)
+
+
 class RemediationPlan(BaseModel):
     """Human-readable proposal; these strings are never executed as commands."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
-    summary: str = Field(min_length=1, max_length=1000)
-    steps: list[str] = Field(min_length=1, max_length=8)
+    summary: str = Field(min_length=1, max_length=MAX_PLAN_SUMMARY_CHARS)
+    steps: list[str] = Field(min_length=1, max_length=MAX_PLAN_STEPS)
 
     @field_validator("summary")
     @classmethod
@@ -31,7 +44,10 @@ class RemediationPlan(BaseModel):
     @field_validator("steps")
     @classmethod
     def valid_steps(cls, values: list[str]) -> list[str]:
-        if any(not isinstance(step, str) or not step.strip() or len(step) > 500 for step in values):
+        if any(
+            not isinstance(step, str) or not step.strip() or len(step) > MAX_PLAN_STEP_CHARS
+            for step in values
+        ):
             raise ValueError("Each plan step must be a short nonempty string")
         return [step.strip() for step in values]
 
@@ -135,18 +151,27 @@ class GatewayPlanner:
             async with client.stream(
                 "POST",
                 self.url + "/chat/completions",
-                headers={"Authorization": "Bearer " + self.api_key},
+                headers={
+                    "Authorization": "Bearer " + self.api_key,
+                    "Accept-Encoding": "identity",
+                },
                 json=request,
             ) as response:
                 response.raise_for_status()
+                # HTTPX's aiter_bytes() decompresses an entire incoming chunk
+                # before yielding it, so checking its length cannot stop a
+                # compressed response from exhausting memory first.
+                encodings = response.headers.get_list("content-encoding", split_commas=True)
+                if any(encoding.strip().lower() != "identity" for encoding in encodings):
+                    raise ValueError("Gateway response must be uncompressed")
                 body = bytearray()
                 async for chunk in response.aiter_bytes():
-                    if len(body) + len(chunk) > 16384:
+                    if len(body) + len(chunk) > MAX_GATEWAY_RESPONSE_BYTES:
                         raise ValueError("Gateway response is too large")
                     body.extend(chunk)
         choice = json.loads(body)["choices"][0]
-        if choice.get("finish_reason") == "length":
-            raise ValueError("Gateway plan was cut off by the token limit")
+        if choice.get("finish_reason") != "stop":
+            raise ValueError("Gateway did not confirm normal completion of the plan")
         content = choice["message"]["content"]
         if not isinstance(content, str):
             raise ValueError("Gateway returned no plan")
