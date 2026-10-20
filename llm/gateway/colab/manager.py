@@ -36,7 +36,7 @@ def setup_diagnostic(event):
         "torch_check": "проверка PyTorch",
         "model_download": "скачивание модели",
         "nimble_prepare": "подготовка Nimble, базовых весов и LoRA",
-        "server": "загрузка модели и LoRA в память runtime",
+        "server": "загрузка модели и LoRA в память среды",
     }
     reasons = {
         "ensurepip_missing": "отсутствует ensurepip",
@@ -151,7 +151,9 @@ class ColabManager:
             async with self.store.lock(key):
                 existing = self.store.get(key)
                 if existing and existing.get("provider") != "colab_managed":
-                    raise GatewayError("Имя профиля уже занято другим провайдером.")
+                    raise GatewayError(
+                        "Это имя профиля используется для другого сервиса. Выберите другое."
+                    )
                 if existing and (existing.get("runtime_name") or existing.get("request_id")):
                     previous = DeploymentSettings.model_validate(existing["settings"])
                     if (
@@ -160,7 +162,8 @@ class ColabManager:
                         or previous.runtime_version != settings.runtime_version
                     ):
                         raise GatewayError(
-                            "Сначала удалите текущий runtime, чтобы сменить аккаунт, GPU или образ."
+                            "Сначала завершите текущую среду Colab, "
+                            "чтобы сменить аккаунт, GPU или образ."
                         )
                 record = existing or {
                     "kind": "account",
@@ -211,7 +214,8 @@ class ColabManager:
         record = self.record(account)
         if not record.get("runtime_name"):
             raise GatewayError(
-                "Runtime ещё не создан. Выберите Запуск в SPAS TUI.", code="provider_unavailable"
+                "Среда Colab ещё не создана. Выберите «Запустить модель» в меню подключения.",
+                code="provider_unavailable",
             )
         settings = DeploymentSettings.model_validate(record["settings"])
         try:
@@ -265,7 +269,8 @@ class ColabManager:
             specs = await self.api.specs(settings.google_account)
             if not any(item.get("eligible") and item["key"] == settings.spec() for item in specs):
                 raise GatewayError(
-                    "Выбранный runtime сейчас недоступен этому аккаунту.",
+                    "Среда Colab недоступна этому аккаунту. "
+                    "Проверьте, под каким аккаунтом выполнен вход.",
                     code="colab_spec_unavailable",
                 )
             record = await self.patch(
@@ -376,7 +381,7 @@ class ColabManager:
                             clean = valid_progress(event)
                             if clean is None:
                                 raise GatewayError(
-                                    "Runtime вернул неверный статус установки.",
+                                    "Не удалось определить состояние установки в Colab.",
                                     code="colab_invalid_response",
                                 )
                             progress(clean)
@@ -398,13 +403,13 @@ class ColabManager:
                                     "colab_download_failed",
                                 ),
                                 "STARTING": (
-                                    "Модель не загрузилась. Проверьте формат весов, "
-                                    "chat template и объём памяти выбранного runtime.",
+                                    "Не удалось загрузить модель. Проверьте формат весов, "
+                                    "шаблон чата и объём памяти среды Colab.",
                                     "colab_model_load_failed",
                                 ),
                                 "PREPARING": (
                                     "Не удалось подготовить Nimble. "
-                                    "Скачанные веса остаются в кэше runtime; "
+                                    "Скачанные веса сохранены в среде Colab; "
                                     "диагностика сохранена в setup-error.log каталога подключения.",
                                     "colab_model_prepare_failed",
                                 ),
@@ -428,7 +433,7 @@ class ColabManager:
                             raise GatewayError(message, code=code)
                         if stage not in {"INSTALLING", "DOWNLOADING", "STARTING", "READY"}:
                             raise GatewayError(
-                                "Runtime вернул неверный этап установки.",
+                                "Не удалось определить этап установки в Colab.",
                                 code="colab_invalid_response",
                             )
                         if stage != "READY":
@@ -505,7 +510,9 @@ class ColabManager:
             except (GatewayError, TimeoutError) as error:
                 if not isinstance(error, GatewayError):
                     error = GatewayError(
-                        "Истекло время ожидания runtime.", code="provider_timeout", status=504
+                        "Среда Colab не ответила вовремя. Повторите запуск.",
+                        code="provider_timeout",
+                        status=504,
                     )
                 await self.patch(
                     account,
@@ -601,7 +608,9 @@ class ColabManager:
                     )
                     models = [{"id": item["id"], "name": item["id"]} for item in data]
         if models is None:
-            raise GatewayError("Сервер модели остановлен. Выполните запуск в TUI.")
+            raise GatewayError(
+                "Модель остановлена. Выберите «Запустить модель» в меню подключения."
+            )
         return models
 
     async def status(self, account):

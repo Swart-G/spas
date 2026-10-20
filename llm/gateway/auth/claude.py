@@ -93,7 +93,10 @@ class ClaudeProfiles:
             if record is None or record.get("provider") != "claude_subscription":
                 raise GatewayError("Профиль Claude не подключён.", code="reauth_required")
             if not create and not allow_reauth and record["state"] == AccountState.REAUTH_REQUIRED:
-                raise GatewayError("Нужен повторный вход в Claude.", code="reauth_required")
+                raise GatewayError(
+                    "Сессия Claude недействительна. Войдите в аккаунт снова.",
+                    code="reauth_required",
+                )
             memory_dir = Path("/dev/shm")
             parent = (
                 str(memory_dir) if memory_dir.is_dir() and os.access(memory_dir, os.W_OK) else None

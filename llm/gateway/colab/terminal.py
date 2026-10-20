@@ -97,7 +97,8 @@ async def relay(socket, read, write, size):
 async def open_terminal(manager, account):
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise GatewayError(
-            "Терминал Colab требует интерактивный TTY.", code="terminal_requires_tty"
+            "Откройте терминал Colab в интерактивном окне: docker compose run --rm tui.",
+            code="terminal_requires_tty",
         )
     bridge = await manager.connect(account)
     print("Терминал Colab. Ctrl+] — вернуться, Ctrl+C — прервать удалённую команду.")

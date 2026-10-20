@@ -162,6 +162,30 @@ async def test_colab_streaming_usage(tmp_path):
     assert events[-1].usage.as_dict()["total_tokens"] == 5
 
 
+@pytest.mark.parametrize("stream", [False, True])
+async def test_remote_refusal_preserves_text_and_completion_reason(tmp_path, stream):
+    def handler(_):
+        result = completion()
+        result["choices"][0]["message"] = {"content": None, "refusal": "Cannot help."}
+        if not stream:
+            return httpx.Response(200, json=result)
+        chunks = [
+            {"choices": [{"delta": {"refusal": "Cannot "}}]},
+            {"choices": [{"delta": {"refusal": "help."}}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+            {"choices": [], "usage": result["usage"]},
+            "[DONE]",
+        ]
+        return httpx.Response(200, text="".join(frame(chunk) for chunk in chunks))
+
+    client, _, adapter = await adapter_for(tmp_path, handler)
+    async with client:
+        result = await adapter.generate(request(stream=stream))
+    assert result.content == "Cannot help."
+    assert result.finish_reason == "content_filter"
+    assert result.usage.as_dict()["total_tokens"] == 4
+
+
 @pytest.mark.parametrize(
     "content",
     [

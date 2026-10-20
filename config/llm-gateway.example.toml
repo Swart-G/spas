@@ -22,6 +22,38 @@ sonnet-default = ["claude"]
 # An ordered list explicitly authorizes use of a fallback backend:
 # diagnostic-default = ["chatgpt", "claude"]
 
+# Any OpenAI-compatible API (cloud service or local server):
+# [backends.custom-api]
+# provider = "openai_compatible"
+# account = "custom-api"
+# base_url = "http://127.0.0.1:1234/v1"
+# model = "your-model-id"
+# api_format = "chat_completions" # or "responses"
+# api_streaming = true
+# api_include_usage = false      # Chat Completions stream_options.include_usage
+# api_json_output = false        # enable only if the model supports json_object
+# api_token_limit = "max_tokens" # or "max_completion_tokens" (Chat Completions)
+# timeout_seconds = 180
+# max_concurrency = 1
+# Add custom-default = ["custom-api"] under [routes] above.
+# Store credentials separately:
+# spas-llm api-key custom-api --provider openai_compatible
+# Or explicitly use a server without authentication:
+# spas-llm api-key custom-api --provider openai_compatible --no-auth
+# Explicit URL paths are preserved, including /proxy/api/v3; bare hosts get /v1.
+
+# Decision models use state + questions instead of messages:
+# [backends.decision-api]
+# provider = "openai_compatible"
+# account = "decision-api"
+# model = "inception/mercury-decide:free"
+# base_url = "https://openrouter.ai/api/alpha/decisions"
+# api_format = "decisions" # or "systemone" for a /v1/systemone service
+# api_streaming = false
+# decision_box = false # Mercury: Choice, Noul, Score; Jev 1.14 also supports Box
+# Add decision-default = ["decision-api"] under [routes] above.
+# spas-llm api-key decision-api --provider openai_compatible
+
 # Colab connections are created through SPAS TUI → Google Colab.
 # Credentials are stored in the encrypted vault, never in this TOML.
 # Full provisioning: choose Google Colab in TUI, configure Google Desktop OAuth,

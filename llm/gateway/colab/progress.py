@@ -10,24 +10,24 @@ from rich.table import Table
 from rich.text import Text
 
 STEPS = {
-    "allocate": "Colab runtime · выделение или восстановление",
-    "connect": "Colab proxy · подключение",
-    "kernel": "Jupyter · запуск установщика",
-    "prepare": "Runtime · подготовка и проверка кэша",
-    "stop_previous": "Предыдущая модель · остановка",
-    "venv": "Python · окружение",
-    "dependencies": "Python · зависимости сервера",
-    "torch_check": "PyTorch · проверка",
-    "torch": "PyTorch · установка",
-    "model_download": "Модель · скачивание весов и tokenizer",
-    "nimble_prepare": "Nimble · подготовка модели решений",
-    "scorer_download": "Nimble · скачивание scorer",
-    "contract": "Nimble · проверка контракта",
-    "base_download": "Qwen · скачивание базовых весов",
-    "merge": "Nimble · слияние LoRA",
-    "server": "Сервер · запуск и загрузка модели",
-    "verify": "Gateway · проверочный запрос к модели",
-    "route": "Gateway · применение маршрута",
+    "allocate": "Создание среды Colab",
+    "connect": "Подключение к Colab",
+    "kernel": "Запуск установки",
+    "prepare": "Подготовка среды и проверка кэша",
+    "stop_previous": "Остановка предыдущей модели",
+    "venv": "Подготовка окружения Python",
+    "dependencies": "Установка зависимостей",
+    "torch_check": "Проверка PyTorch",
+    "torch": "Установка PyTorch",
+    "model_download": "Скачивание модели и токенизатора",
+    "nimble_prepare": "Подготовка Nimble",
+    "scorer_download": "Скачивание модуля оценки Nimble",
+    "contract": "Проверка совместимости Nimble",
+    "base_download": "Скачивание базовой модели Qwen",
+    "merge": "Подготовка адаптера LoRA",
+    "server": "Запуск сервера и загрузка модели",
+    "verify": "Проверка ответа модели",
+    "route": "Настройка маршрута в шлюзе",
 }
 STATUS = {
     "pending": ("○", "Ожидание", "bright_white"),
@@ -41,7 +41,7 @@ STATUS = {
 
 
 REASONS = {
-    "stalled": "Застой скачивания",
+    "stalled": "Скачивание не продвигается",
     "network_error": "Временная ошибка сети",
     "rate_limited": "Ограничение сервера",
     "worker_failed": "Загрузчик завершился без результата",
@@ -108,8 +108,8 @@ class Step:
 
 
 def amount(value):
-    for suffix in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if value < 1024 or suffix == "TiB":
+    for suffix in ("Б", "КиБ", "МиБ", "ГиБ", "ТиБ"):
+        if value < 1024 or suffix == "ТиБ":
             return f"{value:.1f} {suffix}"
         value /= 1024
 
@@ -182,7 +182,7 @@ class StartupDisplay:
         now = self.ended if self.ended is not None else self.clock()
         completed = sum(row.status in {"done", "skipped"} for row in self.rows.values())
         heading = Text(
-            f"[+] {self.result} {completed}/{len(self.rows)} · {now - self.started:.1f}s",
+            f"[+] {self.result} {completed}/{len(self.rows)} · {now - self.started:.1f} с",
             style="bold bright_white",
         )
         table = Table.grid(padding=(0, 1), expand=True)
@@ -193,7 +193,7 @@ class StartupDisplay:
         for key, row in self.rows.items():
             icon, label, color = STATUS[row.status]
             duration = (
-                f"{(row.ended if row.ended is not None else now) - row.started:.1f}s"
+                f"{(row.ended if row.ended is not None else now) - row.started:.1f} с"
                 if row.started is not None
                 else "—"
             )
@@ -207,10 +207,12 @@ class StartupDisplay:
                 detail = f"Попытка {row.attempt}/{row.max_attempts}"
                 if row.reason:
                     detail += " · " + REASONS[row.reason]
+                table.add_row("", Text(detail, style="bright_yellow"), "", "")
                 if row.status == "retrying":
                     remaining = max(0, row.retry_delay - (now - row.retry_started))
-                    detail += f" · повтор через {remaining:.0f}s"
-                table.add_row("", Text(detail, style="bright_yellow"), "", "")
+                    table.add_row(
+                        "", Text(f"Повтор через {remaining:.0f} с", style="bright_yellow"), "", ""
+                    )
             if row.total > 0:
                 fraction = min(row.completed / row.total, 1)
                 detail = (
@@ -221,10 +223,10 @@ class StartupDisplay:
                 if row.unit == "bytes" and row.files_total:
                     detail += f" · файлов {int(row.files_completed)}/{int(row.files_total)}"
                 if row.unit == "bytes" and row.status == "running":
-                    detail += f" · {amount(row.rate)}/s"
+                    detail += f" · {amount(row.rate)}/с"
                     if row.rate > 0:
                         detail += (
-                            f" · осталось ~{max(0, row.total - row.completed) / row.rate:.0f}s"
+                            f" · осталось ≈ {max(0, row.total - row.completed) / row.rate:.0f} с"
                         )
                 if row.status == "running":
                     table.add_row(
@@ -242,7 +244,7 @@ class StartupDisplay:
         info = f"{self.name} · {self.model}"
         if self.vm_started_at and self.vm_lifetime_seconds:
             remaining = max(0, int(self.vm_lifetime_seconds - (time.time() - self.vm_started_at)))
-            info += f" · VM: ≈ {remaining // 3600}ч {(remaining % 3600) // 60}м осталось (оценка)"
+            info += f" · до завершения среды ≈ {remaining // 3600} ч {(remaining % 3600) // 60} мин"
         return Group(heading, Text(info, style="bright_cyan"), table)
 
     def __enter__(self):

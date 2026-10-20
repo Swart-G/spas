@@ -1,18 +1,18 @@
 import asyncio
 import json
-import os
 from pathlib import Path
 
 import httpx
 from rich.table import Table
+from rich.text import Text
 
 from ..auth.credentials import CredentialStore
 from ..auth.google import GoogleAuth
 from ..auth.manager import AuthManager, account_key
-from ..cli import console, save_config
+from ..cli import apply_gateway, console, save_config
 from ..config import BackendConfig, GatewayConfig
 from ..core.errors import GatewayError
-from ..main import GatewayKeys
+from ..presentation import AUTH_STATES, RETURN_PROMPT, STAGES, show_status
 from ..terminal import Back, input_text_async
 from ..tui import ask, confirm, execute, menu, number, page_header
 from .lifetime import time_label
@@ -20,8 +20,8 @@ from .manager import ColabManager, DeploymentSettings
 from .progress import StartupDisplay
 
 
-def integer(label, *, default):
-    return number(label, default=default, integer=True)
+def integer(label, *, default, **bounds):
+    return number(label, default=default, integer=True, **bounds)
 
 
 def menu_loop(options, title, action, *, before=lambda: None):
@@ -41,44 +41,13 @@ def menu_loop(options, title, action, *, before=lambda: None):
         except GatewayError as error:
             console.print(error.message, markup=False, style="red")
         except (OSError, ValueError):
-            console.print("Проверьте файл, профиль и параметры Colab.", style="red")
+            console.print(
+                "Не удалось выполнить действие. Проверьте файл и настройки Colab.", style="red"
+            )
         try:
-            ask("Enter или Esc — вернуться", default="")
+            ask(RETURN_PROMPT, default="")
         except (Back, KeyboardInterrupt):
             pass
-
-
-STAGES = {
-    "ALLOCATING": "Создаётся runtime",
-    "INSTALLING": "Устанавливается inference-сервер",
-    "DOWNLOADING": "Скачивается модель",
-    "STARTING": "Модель загружается в память",
-    "READY": "Сервер модели готов",
-    "VERIFYING": "Проверяется реальная генерация",
-    "VERIFIED": "Модель проверена и готова для агентов",
-}
-
-
-async def apply_gateway(state_dir: Path):
-    keys = GatewayKeys.load(CredentialStore(state_dir))
-    if not keys.admin:
-        raise GatewayError("Нужен внутренний ключ администратора Gateway.")
-    url = os.environ.get("SPAS_GATEWAY_URL", "http://127.0.0.1:8008").rstrip("/")
-    try:
-        async with httpx.AsyncClient(follow_redirects=False) as client:
-            response = await client.post(
-                url + "/admin/reload", headers={"Authorization": "Bearer " + keys.admin}
-            )
-        if response.status_code == 409:
-            raise GatewayError("Подключение занято запросом. Повторите применение настроек.")
-        if response.status_code != 200:
-            raise GatewayError(
-                "Gateway не применил настройки. Проверьте его состояние и ключ администратора."
-            )
-    except httpx.HTTPError as error:
-        raise GatewayError(
-            "Gateway недоступен. Сохранённые настройки можно применить позже."
-        ) from error
 
 
 async def google_action(state_dir, operation, account, **options):
@@ -95,55 +64,70 @@ async def google_action(state_dir, operation, account, **options):
                 consent=options.get("consent", False),
                 read_code=lambda: input_text_async("Код Google из браузера", password=True),
             )
-            console.print("Google-аккаунт подключён.")
+            console.print("Аккаунт Google подключён.")
         elif operation == "logout":
-            if not await google.logout(account):
-                console.print("Локальная сессия удалена. Отзыв Google не подтверждён.")
+            revoked = await google.logout(account)
+            console.print("Выход из аккаунта Google выполнен на этом устройстве.")
+            if not revoked:
+                console.print(
+                    "Чтобы завершить доступ в Google, отзовите его в настройках аккаунта."
+                )
         elif operation == "access":
             manager = ColabManager(google.store, client)
             specs = await manager.api.specs(account)
             console.print("Подключение к Colab подтверждено.")
-            console.print(json.dumps(specs, ensure_ascii=False, indent=2), markup=False)
+            table = Table("Тип среды", "Ускоритель", "Память", "Доступность")
+            for spec in specs:
+                key = spec.get("key", {})
+                accelerator = key.get("accelerator", "NONE")
+                table.add_row(
+                    "GPU" if key.get("variant") == "VARIANT_GPU" else "CPU",
+                    accelerator if accelerator != "NONE" else "—",
+                    "Увеличенная" if key.get("shape") == "SHAPE_HIGHMEM" else "Стандартная",
+                    "Доступна" if spec.get("eligible") else "Недоступна",
+                )
+            console.print(table)
 
 
 def show_google_accounts(state_dir):
-    table = Table("Google-профиль", "Email", "Состояние")
+    table = Table("Аккаунт Google", "Почта", "Состояние")
     for record in CredentialStore(state_dir).all_accounts():
         if record["provider"] == "google_colab":
             public = AuthManager.public_account(record)
-            table.add_row(public["account"], public.get("email") or "—", public["state"])
-    console.print(table)
+            table.add_row(
+                public["account"],
+                public.get("email") or "—",
+                AUTH_STATES.get(public.get("state"), "Нет подключения"),
+            )
+    console.print(table if table.row_count else "Аккаунтов пока нет. Подключите аккаунт Google.")
 
 
 def manage_google(state_dir):
     def show_accounts():
         console.print(
-            "Вход через официальное приложение Colab CLI: откройте ссылку в браузере "
-            "и вставьте код Google сюда. Собственный Google проект не требуется."
+            "Откройте ссылку в браузере, войдите в Google и вставьте полученный код в это окно."
         )
         show_google_accounts(state_dir)
 
     menu_loop(
         [
-            ("login_cli", "Войти в Google через Colab CLI"),
+            ("login_cli", "Подключить аккаунт Google"),
             ("access", "Проверить подключение к Colab"),
             ("logout", "Выйти из Google"),
-            ("configure", "Дополнительно: свой Desktop OAuth-клиент для Colab API beta"),
-            ("login", "Дополнительно: вход через свой OAuth-клиент"),
+            ("configure", "Свой OAuth-клиент (расширенная настройка)"),
+            ("login", "Войти через свой OAuth-клиент"),
         ],
-        "Google-аккаунт",
+        "Аккаунты Google",
         lambda operation: google_form(state_dir, operation),
         before=show_accounts,
     )
 
 
 def google_form(state_dir, operation):
-    account = ask("Имя Google-аккаунта", default="google-main")
+    account = ask("Имя аккаунта Google в СПАС", default="google-main")
     options = {}
     if operation == "configure":
-        path = ask(
-            "Путь к JSON Desktop OAuth-клиента внутри контейнера (Enter — ввод вручную)", default=""
-        )
+        path = ask("Файл OAuth-клиента в контейнере (Enter — ввести вручную)", default="")
         if path:
             with Path(path).open() as source:
                 data = json.load(source)
@@ -159,8 +143,8 @@ def google_form(state_dir, operation):
                 "client_secret": installed.get("client_secret", ""),
             }
         else:
-            options["client_id"] = ask("Google Desktop client_id")
-            options["client_secret"] = ask("Google client_secret", password=True)
+            options["client_id"] = ask("ID OAuth-клиента (client_id)")
+            options["client_secret"] = ask("Секрет OAuth-клиента (client_secret)", password=True)
     elif operation == "login":
         options["consent"] = confirm("Повторно запросить согласие Google?", default=False)
     asyncio.run(google_action(state_dir, operation, account, **options))
@@ -179,15 +163,15 @@ async def save_deployment(state_dir, account, settings, hf_token):
         )
 
 
-def configure_deployment(config, config_path, state_dir, *, name=None):
+def configure_deployment(config, config_path, state_dir, *, name=None, advanced=False):
     store = CredentialStore(state_dir)
     accounts = [
         record["account"] for record in store.all_accounts() if record["provider"] == "google_colab"
     ]
     if not accounts:
-        raise GatewayError("Сначала настройте Google-аккаунт и выполните вход.")
+        raise GatewayError("Сначала подключите аккаунт в разделе «Аккаунты Google».")
     if name is None:
-        name = ask("Имя нового подключения Colab", default="colab-gpu")
+        name = ask("Название подключения", default="colab-gpu")
         if name in config.backends:
             raise GatewayError("Подключение уже существует. Выберите его в списке для настройки.")
     current = config.backends.get(name)
@@ -196,10 +180,10 @@ def configure_deployment(config, config_path, state_dir, *, name=None):
     account = current.account if current else name
     record = store.get(account_key(account))
     if record and record.get("provider") != "colab_managed":
-        raise GatewayError("Имя профиля уже занято другим провайдером. Выберите другое имя.")
+        raise GatewayError("Это имя профиля уже используется другим сервисом. Выберите другое.")
     old = DeploymentSettings.model_validate(record["settings"]) if record else None
     google_account = ask(
-        "Google-аккаунт", choices=accounts, default=old.google_account if old else accounts[0]
+        "Аккаунт Google", choices=accounts, default=old.google_account if old else accounts[0]
     )
     specs = asyncio.run(available_specs(state_dir, google_account))
     eligible = [
@@ -208,19 +192,21 @@ def configure_deployment(config, config_path, state_dir, *, name=None):
         if item.get("eligible") and item["key"].get("variant") in {"VARIANT_GPU", "VARIANT_CPU"}
     ]
     if not eligible:
-        raise GatewayError("Нет доступных CPU/GPU runtime. Проверьте квоту аккаунта.")
-    table = Table("№", "Тип", "GPU", "Память")
+        raise GatewayError("Нет доступных сред Colab. Проверьте квоту аккаунта Google.")
+    table = Table("№", "Тип", "Ускоритель", "Оперативная память")
     for index, spec in enumerate(eligible):
         table.add_row(
             str(index + 1),
             "GPU" if spec["variant"] == "VARIANT_GPU" else "CPU",
-            spec["accelerator"],
-            "Увеличенная RAM" if spec["shape"] == "SHAPE_HIGHMEM" else "Стандартная",
+            spec["accelerator"] if spec["accelerator"] != "NONE" else "—",
+            "Увеличенная" if spec["shape"] == "SHAPE_HIGHMEM" else "Стандартная",
         )
     console.print(table)
     cli_transport = store.get(account_key(google_account)).get("auth_transport") == "cli"
     if cli_transport:
-        console.print("Доступность выбранного GPU и RAM проверяется Colab при запуске.")
+        console.print(
+            "Colab проверит доступность выбранного ускорителя и объёма памяти при запуске."
+        )
     default_spec = (
         old.spec()
         if old
@@ -228,68 +214,95 @@ def configure_deployment(config, config_path, state_dir, *, name=None):
     )
     default_index = next((i for i, spec in enumerate(eligible) if spec == default_spec), 0)
     choice = ask(
-        "Runtime",
+        "Среда Colab",
         choices=[str(index + 1) for index in range(len(eligible))],
         default=str(default_index + 1),
     )
     spec = eligible[int(choice) - 1]
-    settings = DeploymentSettings(
+    settings_data = old.model_dump() if old else {}
+    settings_data.update(
         google_account=google_account,
-        **{"variant": spec["variant"], "accelerator": spec["accelerator"], "shape": spec["shape"]},
-        runtime_version=""
-        if cli_transport
-        else ask("Образ Colab (Enter — актуальный)", default=old.runtime_version if old else ""),
+        **spec,
         model_repo=ask(
-            "Hugging Face модель (safetensors и chat template)",
+            "Репозиторий модели на Hugging Face",
             default=old.model_repo if old else "Qwen/Qwen2.5-1.5B-Instruct",
         ),
-        revision=ask("Ревизия модели", default=old.revision if old else "main"),
-        model_kind=ask(
-            "Тип модели (auto распознаёт Bespoke-Nimble)",
-            choices=["auto", "chat", "nimble"],
-            default=old.model_kind if old else "auto",
-        ),
-        precision=ask(
-            "Точность весов",
-            choices=["auto", "float16", "bfloat16", "float32"],
-            default=old.precision if old else "auto",
-        ),
-        port=integer("Порт модели внутри runtime", default=old.port if old else 8000),
-        max_context=integer(
-            "Максимальный контекст, токенов", default=old.max_context if old else 4096
-        ),
-        max_new_tokens=integer(
-            "Максимальный ответ по умолчанию, токенов", default=old.max_new_tokens if old else 256
-        ),
-        setup_timeout=integer(
-            "Лимит установки и скачивания, секунд", default=old.setup_timeout if old else 3600
-        ),
-        startup_timeout=integer(
-            "Лимит загрузки модели, секунд", default=old.startup_timeout if old else 600
-        ),
-        download_stall_timeout=integer(
-            "Повторить скачивание после застоя, секунд",
-            default=old.download_stall_timeout if old else 180,
-        ),
-        download_max_attempts=integer(
-            "Максимум попыток скачивания",
-            default=old.download_max_attempts if old else 3,
-        ),
-        download_retry_backoff=integer(
-            "Начальная пауза между попытками, секунд",
-            default=old.download_retry_backoff if old else 5,
-        ),
-        auto_create_runtime=old.auto_create_runtime if old else False,
-        vm_lifetime_hours=old.vm_lifetime_hours if old else 12,
     )
-    hf_token = ask("Hugging Face token (Enter — сохранить, - удалить)", password=True)
+    if advanced:
+        settings_data["max_context"] = integer(
+            "Размер контекста, токенов",
+            default=old.max_context if old else 4096,
+            minimum=256,
+            maximum=131072,
+        )
+        settings_data.update(
+            runtime_version=""
+            if cli_transport
+            else ask(
+                "Образ Colab (Enter — актуальный)", default=old.runtime_version if old else ""
+            ),
+            revision=ask("Ревизия модели", default=old.revision if old else "main"),
+            model_kind=ask(
+                "Тип модели",
+                choices=["auto", "chat", "nimble"],
+                default=old.model_kind if old else "auto",
+            ),
+            precision=ask(
+                "Точность весов",
+                choices=["auto", "float16", "bfloat16", "float32"],
+                default=old.precision if old else "auto",
+            ),
+            port=integer(
+                "Порт сервера модели",
+                default=old.port if old else 8000,
+                minimum=1024,
+                maximum=65535,
+            ),
+            max_new_tokens=integer(
+                "Длина ответа по умолчанию, токенов",
+                default=min(old.max_new_tokens if old else 256, settings_data["max_context"] - 1),
+                minimum=1,
+                maximum=min(8192, settings_data["max_context"] - 1),
+            ),
+            setup_timeout=integer(
+                "Время ожидания установки, с",
+                default=old.setup_timeout if old else 3600,
+                minimum=60,
+                maximum=14400,
+            ),
+            startup_timeout=integer(
+                "Время ожидания загрузки модели, с",
+                default=old.startup_timeout if old else 600,
+                minimum=30,
+                maximum=3600,
+            ),
+            download_stall_timeout=integer(
+                "Время ожидания прогресса скачивания, с",
+                default=old.download_stall_timeout if old else 180,
+                minimum=30,
+                maximum=1800,
+            ),
+            download_max_attempts=integer(
+                "Максимум попыток скачивания",
+                default=old.download_max_attempts if old else 3,
+                minimum=1,
+                maximum=10,
+            ),
+            download_retry_backoff=integer(
+                "Пауза перед повторным скачиванием, с",
+                default=old.download_retry_backoff if old else 5,
+                minimum=0,
+                maximum=60,
+            ),
+        )
+    settings = DeploymentSettings.model_validate(settings_data)
+    hf_token = ask("Токен Hugging Face (Enter — оставить, - — удалить)", password=True)
     hf_token = None if not hf_token else ("" if hf_token == "-" else hf_token)
-    timeout = number(
-        "Таймаут ответа через транспорт Colab, секунд",
-        default=current.timeout_seconds if current else 180,
-    )
+    timeout = current.timeout_seconds if current else 180
+    if advanced:
+        timeout = number("Время ожидания ответа, с", default=timeout, minimum=1, maximum=3600)
     alias = ask(
-        "Имя модели для агентов СПАС",
+        "Имя модели в шлюзе",
         default=next(
             (alias for alias, backends in config.routes.items() if backends == [name]),
             f"{name}-default",
@@ -309,11 +322,13 @@ def configure_deployment(config, config_path, state_dir, *, name=None):
     ).model_dump()
     updated["routes"][alias] = [name]
     validated = GatewayConfig.model_validate(updated)
-    asyncio.run(save_deployment(state_dir, account, settings, hf_token))
-    save_config(validated, config_path)
-    console.print(
-        "Настройки сохранены. Изменения модели применяются через «Полный запуск / восстановление»."
+    save_config(
+        validated,
+        config_path,
+        expected=config,
+        before_write=lambda: asyncio.run(save_deployment(state_dir, account, settings, hf_token)),
     )
+    console.print("Настройки сохранены. Выберите «Запустить модель», чтобы применить изменения.")
 
 
 async def deployment_action(state_dir, account, operation, *, progress=None):
@@ -326,10 +341,7 @@ async def deployment_action(state_dir, account, operation, *, progress=None):
         elif operation == "delete":
             await manager.delete(account)
         elif operation == "status":
-            console.print(
-                json.dumps(await manager.status(account), ensure_ascii=False, indent=2),
-                markup=False,
-            )
+            show_status(console, await manager.status(account))
         elif operation == "terminal":
             from .terminal import open_terminal
 
@@ -344,48 +356,63 @@ def managed_backends(config):
     }
 
 
-STAGE_LABELS = {
-    "CONFIGURED": "Настроен",
-    "READY": "Готов",
-    "STOPPED": "Модель остановлена",
-    "DELETED": "Runtime удалён",
-    "FAILED": "Ошибка запуска",
-    "EXPIRED": "Runtime истёк",
-    "INTERRUPTED": "Запуск прерван",
-    **STAGES,
-}
+STAGE_LABELS = STAGES
 
 
 def show_deployments(config_path, state_dir, *, name=None):
     store = CredentialStore(state_dir)
     config = GatewayConfig.load(config_path)
+    compact = console.width < 112
     table = Table(
-        "Подключение",
-        "Модель",
-        "GPU",
-        "Состояние",
-        "VM осталось (оценка)",
-        "Автосоздание",
-        "Маршруты",
+        *(
+            ["Подключение / модель", "Ресурс", "Состояние", "Маршруты"]
+            if compact
+            else [
+                "Подключение",
+                "Модель",
+                "Ускоритель",
+                "Состояние",
+                "Осталось времени",
+                "Автозапуск",
+                "Маршруты",
+            ]
+        )
     )
+    for column in table.columns:
+        column.overflow = "fold"
     for key, backend in managed_backends(config).items():
         if name is not None and key != name:
             continue
         record = store.get(account_key(backend.account)) or {}
         settings = record.get("settings", {})
         stage = record.get("stage")
-        table.add_row(
-            key,
-            backend.model,
-            settings.get("accelerator", "—"),
-            STAGE_LABELS.get(stage, stage or "Не настроен"),
-            time_label(record),
-            ("Пауза" if record.get("auto_creation_paused") else "Включено")
-            if settings.get("auto_create_runtime")
-            else "Выключено",
-            ", ".join(alias for alias, backends in config.routes.items() if key in backends) or "—",
+        resource = (
+            "CPU" if settings.get("accelerator") == "NONE" else settings.get("accelerator", "—")
         )
-    console.print(table)
+        status = STAGE_LABELS.get(stage, "Нет данных")
+        remaining = time_label(record)
+        auto = (
+            ("Приостановлен" if record.get("auto_creation_paused") else "Включён")
+            if settings.get("auto_create_runtime")
+            else "Выключен"
+        )
+        routes = (
+            ", ".join(alias for alias, backends in config.routes.items() if key in backends) or "—"
+        )
+        cells = (
+            [
+                key + "\n" + backend.model,
+                resource,
+                status + "\n" + remaining + "\nАвтозапуск: " + auto.lower(),
+                routes,
+            ]
+            if compact
+            else [key, backend.model, resource, status, remaining, auto, routes]
+        )
+        table.add_row(*(Text(value) for value in cells))
+    console.print(
+        table if table.row_count else "Подключений пока нет. Выберите «Добавить подключение»."
+    )
 
 
 def manage_full_colab(config, config_path, state_dir):
@@ -393,9 +420,9 @@ def manage_full_colab(config, config_path, state_dir):
         backends = managed_backends(GatewayConfig.load(config_path))
         return [
             *(("connection:" + name, "Открыть " + name) for name in backends),
-            ("google", "Google-аккаунты"),
-            ("create", "Создать подключение Colab"),
-            ("apply", "Применить настройки в Gateway"),
+            ("google", "Аккаунты Google"),
+            ("create", "Добавить подключение"),
+            ("apply", "Применить настройки"),
         ]
 
     menu_loop(
@@ -419,33 +446,23 @@ def manage_connection(name, config_path, state_dir):
             record.get("runtime_name") or record.get("request_id") or record.get("operation")
         )
         return [
-            ("configure", "Модель, GPU и параметры подключения"),
-            ("runtime_policy", "Время жизни VM и автосоздание"),
-            ("start", "Полный запуск / восстановление — runtime, скачивание и сервер"),
-            ("status", "Состояние runtime и модели"),
-            ("models", "Каталог загруженных моделей"),
-            (
-                "probe",
-                "Проверочное решение"
-                if backend.decision_model
-                else "Проверочный запрос, обычный или stream",
-            ),
-            *(
-                [("decide", "Типизированное решение — контекст и схема")]
-                if backend.decision_model
-                else []
-            ),
+            ("configure", "Настройки подключения"),
+            ("parameters", "Расширенные параметры"),
+            ("runtime_policy", "Время работы и автозапуск"),
+            ("start", "Запустить модель"),
+            ("status", "Пинг и состояние модели"),
+            ("models", "Загруженные модели"),
             *(
                 [
                     ("terminal", "Открыть терминал Colab"),
-                    ("stop", "Остановить модель, сохранить runtime"),
-                    ("delete", "Удалить runtime и освободить GPU"),
+                    ("stop", "Остановить модель"),
+                    ("delete", "Завершить среду Colab"),
                 ]
                 if active
                 else []
             ),
             ("remove", "Удалить подключение"),
-            ("apply", "Применить настройки в Gateway"),
+            ("apply", "Применить настройки"),
         ]
 
     menu_loop(
@@ -465,28 +482,33 @@ def full_colab_action(config, config_path, state_dir, operation, *, name=None):
     if operation == "google":
         manage_google(state_dir)
         return
-    if operation in {"create", "configure"}:
-        configure_deployment(config, config_path, state_dir, name=name)
+    if operation in {"create", "configure", "parameters"}:
+        configure_deployment(
+            config, config_path, state_dir, name=name, advanced=operation == "parameters"
+        )
         return
     if operation == "runtime_policy":
         backend = config.backends[name]
         record = CredentialStore(state_dir).get(account_key(backend.account)) or {}
         settings = record.get("settings", {})
         console.print(
-            "При включении Gateway создаёт замену исчезнувшей VM и запускает модель. "
-            "Ручная остановка/удаление приостанавливает автоматику. "
-            "Время жизни — оценка, VM может завершиться раньше."
+            "Если среда Colab завершит работу, автозапуск создаст новую и загрузит модель. "
+            "После ручной остановки автозапуск приостанавливается. "
+            "Оставшееся время приблизительное: Colab может завершить среду раньше."
         )
         enabled = (
             ask(
-                "Автосоздание VM",
+                "Автозапуск модели",
                 choices=["off", "on"],
                 default="on" if settings.get("auto_create_runtime") else "off",
             )
             == "on"
         )
         hours = integer(
-            "Оценочное время жизни VM, часов", default=settings.get("vm_lifetime_hours", 12)
+            "Ожидаемое время работы среды, ч",
+            default=settings.get("vm_lifetime_hours", 12),
+            minimum=1,
+            maximum=168,
         )
 
         async def save_policy():
@@ -496,15 +518,15 @@ def full_colab_action(config, config_path, state_dir, operation, *, name=None):
                 )
 
         asyncio.run(save_policy())
-        console.print("Настройки VM сохранены; Gateway применит автоматику без перезапуска.")
+        console.print("Настройки автозапуска сохранены и применены.")
         return
     if operation == "apply":
         asyncio.run(apply_gateway(state_dir))
-        console.print("Gateway применил настройки.")
+        console.print("Настройки применены.")
         return
     backends = managed_backends(config)
     if not backends:
-        raise GatewayError("Сначала настройте управляемое подключение Colab.")
+        raise GatewayError("Сначала добавьте подключение в разделе «Google Colab».")
     if name not in backends:
         raise GatewayError("Выберите подключение Colab в списке.")
     if operation == "remove":
@@ -514,10 +536,12 @@ def full_colab_action(config, config_path, state_dir, operation, *, name=None):
             if key != name
         ):
             raise GatewayError(
-                "Профиль runtime используется ещё одним подключением. "
-                "Сначала измените его настройки."
+                "Эта среда используется другим подключением. Сначала измените его настройки."
             )
-        if not confirm("Удалить подключение, его runtime, модель и файлы?", default=False):
+        if not confirm(
+            "Удалить подключение и завершить его среду Colab? Модель и файлы среды будут удалены.",
+            default=False,
+        ):
             return
         asyncio.run(deployment_action(state_dir, backends[name].account, "delete"))
         updated = config.model_dump()
@@ -527,12 +551,12 @@ def full_colab_action(config, config_path, state_dir, operation, *, name=None):
             for alias, items in config.routes.items()
             if any(item != name for item in items)
         }
-        save_config(GatewayConfig.model_validate(updated), config_path)
+        save_config(GatewayConfig.model_validate(updated), config_path, expected=config)
         asyncio.run(apply_gateway(state_dir))
-        console.print("Подключение и его runtime удалены.")
+        console.print("Подключение удалено. Среда Colab завершена.")
         return
     if operation == "delete" and not confirm(
-        "Удалить runtime вместе с моделью и файлами?", default=False
+        "Завершить среду Colab? Модель и файлы в ней будут удалены.", default=False
     ):
         return
     if operation == "start":
@@ -546,43 +570,12 @@ def full_colab_action(config, config_path, state_dir, operation, *, name=None):
                 asyncio.run(apply_gateway(state_dir))
             except GatewayError as error:
                 raise GatewayError(
-                    "Модель запущена. Настройки Gateway пока не применены: " + error.message,
+                    "Модель запущена, но шлюз пока не обновлён. " + error.message,
                     code="gateway_reload_pending",
                 ) from error
             display.update({"step": "route", "status": "done"})
-        console.print("Маршрут модели применён в Gateway.")
+        console.print("Модель запущена. Маршрут в шлюзе настроен.")
     elif operation in {"stop", "delete", "status", "terminal"}:
         asyncio.run(deployment_action(state_dir, backends[name].account, operation))
     elif operation == "models":
         execute(config_path, state_dir, "models", backend=name)
-    elif operation == "probe":
-        execute(
-            config_path,
-            state_dir,
-            "probe",
-            backend=name,
-            stream=False
-            if backends[name].decision_model
-            else confirm("Потоковый ответ?", default=False),
-            prompt=ask(
-                "Контекст" if backends[name].decision_model else "Проверочный запрос",
-                default="The service is unavailable."
-                if backends[name].decision_model
-                else "Ответь ровно одним словом: СПАС",
-            ),
-        )
-    elif operation == "decide":
-        context = ask("Контекст для оценки", default="The service is unavailable.")
-        schema = json.loads(
-            ask(
-                "Схема полей JSON (enum/boolean)",
-                default='{"incident":{"type":"boolean","description":"Is there a failure?"}}',
-            )
-        )
-        execute(
-            config_path,
-            state_dir,
-            "decide",
-            backend=name,
-            payload={"context": context, "schema": schema},
-        )

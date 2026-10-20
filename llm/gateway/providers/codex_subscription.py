@@ -21,7 +21,9 @@ async def sse_data(response: httpx.Response) -> AsyncIterator[dict]:
                     if not isinstance(data, dict):
                         raise ValueError("Not an event object")
                 except ValueError as error:
-                    raise GatewayError("Провайдер вернул повреждённый SSE-поток.") from error
+                    raise GatewayError(
+                        "Сервис вернул повреждённый поток. Повторите запрос."
+                    ) from error
                 yield data
             lines, size = [], 0
         elif line.startswith("data:"):
@@ -31,7 +33,7 @@ async def sse_data(response: httpx.Response) -> AsyncIterator[dict]:
             lines.append(data_line)
             size += len(data_line)
             if size > 4 * 1024 * 1024:
-                raise GatewayError("Событие провайдера превысило допустимый размер.")
+                raise GatewayError("Часть ответа сервиса превышает допустимый размер.")
     if lines:
         # SSE requires a blank line terminating each frame; an unfinished frame is not success.
         raise GatewayError("SSE-поток оборвался внутри события.")
@@ -72,7 +74,9 @@ class CodexSubscriptionAdapter(LLMProvider):
 
     def _incomplete(self, result: dict) -> StreamEvent:
         raise GatewayError(
-            "Провайдер не завершил генерацию.", code="provider_incomplete", status=502
+            "Сервис не завершил генерацию. Повторите запрос.",
+            code="provider_incomplete",
+            status=502,
         )
 
     def _payload(self, request: ChatRequest) -> dict:
@@ -127,7 +131,7 @@ class CodexSubscriptionAdapter(LLMProvider):
                     if kind in {"response.output_text.delta", "response.refusal.delta"}:
                         delta = data.get("delta", "")
                         if not isinstance(delta, str):
-                            raise GatewayError("Неверный формат текстового события провайдера.")
+                            raise GatewayError("Сервис вернул текст в неподдерживаемом формате.")
                         refused |= kind == "response.refusal.delta"
                         if delta:
                             had_text = True
@@ -156,10 +160,12 @@ class CodexSubscriptionAdapter(LLMProvider):
                         return
         except httpx.TimeoutException as error:
             raise GatewayError(
-                "Истекло время ожидания провайдера.", code="provider_timeout", status=504
+                "Сервис не ответил вовремя. Повторите запрос или увеличьте время ожидания.",
+                code="provider_timeout",
+                status=504,
             ) from error
         except httpx.HTTPError as error:
-            raise GatewayError("Соединение с провайдером прервано.") from error
+            raise GatewayError("Соединение с сервисом прервано. Повторите запрос.") from error
         raise GatewayError(
             "Поток завершился без response.completed.", code="provider_incomplete", status=502
         )
@@ -187,4 +193,6 @@ class CodexSubscriptionAdapter(LLMProvider):
                 if model.get("visibility") == "list"
             ]
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
-            raise GatewayError("Не удалось получить каталог моделей провайдера.") from error
+            raise GatewayError(
+                "Не удалось получить каталог моделей. Проверьте подключение и доступ к сервису."
+            ) from error

@@ -442,7 +442,7 @@ async def test_pending_assignment_blocks_account_or_gpu_change(deployment):
     service.create_error = 503
     with pytest.raises(GatewayError):
         await manager.start("colab-main")
-    with pytest.raises(GatewayError, match="удалите текущий runtime"):
+    with pytest.raises(GatewayError, match="завершите текущую среду Colab"):
         await manager.configure("colab-main", settings.model_copy(update={"accelerator": "L4"}))
 
 
@@ -508,6 +508,42 @@ async def test_managed_stream_requires_transport_marker_and_kernel_success(deplo
             async for event in source:
                 observed.append(event.kind)
     assert "done" not in observed
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_managed_refusal_preserves_text_and_completion_reason(deployment, stream):
+    manager, _, bridge, _ = deployment
+    await manager.start("colab-main")
+    provider = ColabManagedAdapter(
+        manager.client,
+        AuthManager(manager.store, manager.client),
+        BackendConfig(provider="colab_managed", account="colab-main", model=MODEL),
+        manager=manager,
+    )
+    data = completion()
+    data["choices"][0]["message"] = {"content": None, "refusal": "Cannot help."}
+    bridge.inference_events = (
+        [
+            {"type": "chunk", "data": {"choices": [{"delta": {"refusal": "Cannot help."}}]}},
+            {"type": "chunk", "data": {"choices": [{"delta": {}, "finish_reason": "stop"}]}},
+            {"type": "chunk", "data": {"choices": [], "usage": data["usage"]}},
+            {"type": "transport_done"},
+        ]
+        if stream
+        else [{"type": "response", "data": data}]
+    )
+    request = ChatRequest(
+        model="local", messages=[{"role": "user", "content": "hello"}], stream=stream
+    )
+    result = await provider.generate(request)
+    assert result.content == "Cannot help."
+    assert result.finish_reason == "content_filter"
+    assert result.usage.as_dict()["total_tokens"] == 6
+    if stream:
+        bridge.inference_events.pop()
+        with pytest.raises(GatewayError) as caught:
+            await provider.generate(request)
+        assert caught.value.code == "provider_incomplete"
 
 
 @pytest.mark.parametrize("status, code", [(403, "colab_api_access_denied"), (429, "rate_limited")])

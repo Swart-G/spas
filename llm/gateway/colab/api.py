@@ -49,7 +49,9 @@ class ColabAPI:
                 )
             if response.status_code == 404:
                 raise GatewayError(
-                    "Runtime Colab больше не существует.", code="colab_runtime_missing", status=404
+                    "Среда Colab завершила работу. Запустите модель заново.",
+                    code="colab_runtime_missing",
+                    status=404,
                 )
             if not 200 <= response.status_code < 300:
                 error = upstream_error(
@@ -80,7 +82,8 @@ class ColabAPI:
             for item in specs
         ):
             raise GatewayError(
-                "Colab вернул неверный каталог runtime.", code="colab_invalid_response"
+                "Не удалось получить список доступных сред Colab. Повторите попытку.",
+                code="colab_invalid_response",
             )
         return specs
 
@@ -92,7 +95,8 @@ class ColabAPI:
         runtimes = data.get("runtimes", [])
         if not isinstance(runtimes, list) or any(not isinstance(item, dict) for item in runtimes):
             raise GatewayError(
-                "Colab вернул неверный список runtime.", code="colab_invalid_response"
+                "Не удалось получить список запущенных сред Colab. Повторите попытку.",
+                code="colab_invalid_response",
             )
         return runtimes
 

@@ -8,6 +8,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.screen import Point
+from prompt_toolkit.styles import Style
 from prompt_toolkit.validation import Validator
 
 
@@ -113,7 +114,22 @@ def text_session() -> PromptSession[str]:
     def back(event):
         event.app.exit(exception=Back())
 
-    session: PromptSession[str] = PromptSession(key_bindings=bindings)
+    @bindings.add("c-d")
+    def eof(event):
+        event.app.exit(exception=EOFError())
+
+    session: PromptSession[str] = PromptSession(
+        key_bindings=bindings,
+        style=Style.from_dict(
+            {
+                "": "#ffffff",
+                "prompt": "bold #ffffff",
+                "aborting": "#ffffff",
+                "validation-toolbar": "bg:#8b1e2d #ffffff",
+                "bottom-toolbar": "bg:#1d3441 #ffffff",
+            }
+        ),
+    )
     session.app.ttimeoutlen = 0.05
     session.app.timeoutlen = 0.2
     return session

@@ -23,6 +23,9 @@ def answers(monkeypatch, values):
             highlight=False,
             end="",
         )
+        assert "q" not in values
+        if value == "q":
+            raise EOFError()
         if value == "b":
             raise tui.Back()
         assert value in values
@@ -32,12 +35,11 @@ def answers(monkeypatch, values):
     monkeypatch.setattr(tui, "select", select)
 
 
-@pytest.mark.parametrize("stream", [False, True])
-def test_tui_probe(monkeypatch, tmp_path, stream):
+def test_tui_probe(monkeypatch, tmp_path):
     path = tmp_path / "gateway.toml"
     initialize(tmp_path, path)
-    answers(monkeypatch, ["1", "p", "claude", "hello", "", "q"])
-    monkeypatch.setattr(tui, "confirm", lambda *args, **kwargs: stream)
+    answers(monkeypatch, ["t", "claude", "hello", "", "q"])
+    monkeypatch.setattr(tui, "confirm", lambda *args, **kwargs: pytest.fail("No stream question"))
     calls = []
 
     async def perform(args, config_path, state_dir):
@@ -46,7 +48,9 @@ def test_tui_probe(monkeypatch, tmp_path, stream):
     monkeypatch.setattr(tui, "perform", perform)
     tui.run_tui(path, tmp_path)
     assert len(calls) == 1
-    assert vars(calls[0]) == dict(command="probe", backend="claude", prompt="hello", stream=stream)
+    assert vars(calls[0]) == dict(
+        command="probe", backend="claude", prompt="hello", stream=True, pretty=True
+    )
 
 
 @pytest.mark.parametrize("provider", ["claude", "chatgpt"])
@@ -62,7 +66,7 @@ def test_tui_login(monkeypatch, tmp_path, provider):
     tui.manage_accounts(tmp_path / "config", tmp_path)
     assert calls[0].account == f"{provider}-main"
     assert calls[0].provider == provider
-    assert calls[0].consent == (provider == "chatgpt")
+    assert calls[0].consent is False
 
 
 def test_tui_backend_and_routing(monkeypatch, tmp_path):
@@ -70,7 +74,7 @@ def test_tui_backend_and_routing(monkeypatch, tmp_path):
     initialize(tmp_path, path)
     answers(monkeypatch, ["claude", "claude_subscription", "other-account", "opus", "sdk"])
     monkeypatch.setattr(tui, "number", lambda *args, **kw: 2 if kw.get("integer") else 120)
-    tui.configure_backend(initial_config(), path)
+    tui.configure_backend(initial_config(), path, advanced=True)
     config = GatewayConfig.load(path)
     backend = config.backends["claude"]
     assert (backend.account, backend.model, backend.transport) == ("other-account", "opus", "sdk")
@@ -85,7 +89,7 @@ def test_tui_backend_and_routing(monkeypatch, tmp_path):
 def test_tui_probe_error_returns_to_menu(monkeypatch, tmp_path):
     path = tmp_path / "gateway.toml"
     initialize(tmp_path, path)
-    answers(monkeypatch, ["1", "p", "claude", "hello", "", "q"])
+    answers(monkeypatch, ["t", "claude", "hello", "", "q"])
     monkeypatch.setattr(tui, "confirm", lambda *args, **kwargs: False)
 
     async def perform(args, config_path, state_dir):
@@ -133,7 +137,7 @@ def test_home_has_three_modes_without_connection_settings(monkeypatch, tmp_path,
     "mode, expected, hidden",
     [
         ("1", "claude-main", ["openai-paid", "colab-main"]),
-        ("2", "openai-paid", ["claude-main", "colab-main"]),
+        ("2", "api-model", ["claude-main", "colab-main"]),
         ("3", "colab", ["claude-main", "openai-paid"]),
     ],
 )
@@ -149,21 +153,24 @@ def test_mode_connections_and_back_navigation(
     output = capsys.readouterr().out
     assert expected in output
     assert all(account not in output for account in hidden)
-    assert output.count("Выберите способ работы") == 2
+    assert output.count("Подключения к моделям") == 2
 
 
-def test_subscription_probe_excludes_paid_and_mixed_routes(monkeypatch, tmp_path, mixed_config):
+def test_testing_lists_all_connections_without_duplicate_routes(
+    monkeypatch, tmp_path, mixed_config
+):
     def ask(*args, **kwargs):
-        assert set(kwargs["choices"]) == {"chatgpt", "claude", "codex-default", "sonnet-default"}
+        assert set(kwargs["choices"]) == set(mixed_config.backends)
         raise KeyboardInterrupt
 
     monkeypatch.setattr(tui, "ask", ask)
     with pytest.raises(KeyboardInterrupt):
-        tui.probe(tui.mode_config(mixed_config, "1"), tmp_path / "config", tmp_path)
+        tui.probe(mixed_config, tmp_path / "config", tmp_path)
 
 
 def test_api_configuration_preserves_other_modes(monkeypatch, tmp_path, mixed_config):
     path = tmp_path / "gateway.toml"
+    save_config(mixed_config, path)
     answers(monkeypatch, ["paid", "openai-paid", "new-model"])
     monkeypatch.setattr(tui, "number", lambda *args, **kw: 2 if kw.get("integer") else 120)
     tui.configure_backend(mixed_config, path, "2")
@@ -174,7 +181,7 @@ def test_api_configuration_preserves_other_modes(monkeypatch, tmp_path, mixed_co
     assert saved.backends["colab"] == mixed_config.backends["colab"]
     assert saved.routes == mixed_config.routes
     answers(monkeypatch, ["claude"])
-    with pytest.raises(GatewayError, match="другого режима"):
+    with pytest.raises(GatewayError, match="другом разделе"):
         tui.configure_backend(saved, path, "2")
     assert GatewayConfig.load(path) == saved
 
@@ -211,10 +218,11 @@ def test_cancel_action_returns_to_same_section(monkeypatch, tmp_path, capsys):
     assert "Действие отменено" in capsys.readouterr().out
 
 
-def test_empty_api_probe_does_not_prompt_or_send(monkeypatch, tmp_path):
+def test_empty_testing_does_not_prompt_or_send(monkeypatch, tmp_path):
     path = tmp_path / "gateway.toml"
     initialize(tmp_path, path)
-    answers(monkeypatch, ["2", "p", "", "b", "q"])
+    save_config(GatewayConfig(backends={}, routes={}), path)
+    answers(monkeypatch, ["t", "", "q"])
     tui.run_tui(path, tmp_path)
 
 
@@ -241,16 +249,16 @@ def test_colab_catalog_is_scoped_to_selected_connection(monkeypatch, tmp_path, m
     assert calls == [((path, tmp_path, "models"), {"backend": "colab"})]
 
 
-def test_gateway_can_probe_mixed_route(monkeypatch, tmp_path, mixed_config):
+def test_main_testing_can_probe_api_connection(monkeypatch, tmp_path, mixed_config):
     path = tmp_path / "gateway.toml"
     initialize(tmp_path, path)
     save_config(mixed_config, path)
-    answers(monkeypatch, ["g", "p", "mixed", "hello", "", "b", "q"])
+    answers(monkeypatch, ["t", "paid", "hello", "", "q"])
     monkeypatch.setattr(tui, "confirm", lambda *args, **kwargs: False)
     calls = []
     monkeypatch.setattr(tui, "execute", lambda *args, **kwargs: calls.append(kwargs))
     tui.run_tui(path, tmp_path)
-    assert calls == [{"backend": "mixed", "prompt": "hello", "stream": False}]
+    assert calls == [{"backend": "paid", "prompt": "hello", "stream": True}]
 
 
 def test_escape_nested_menu_returns_without_pause(monkeypatch, tmp_path):
@@ -260,10 +268,10 @@ def test_escape_nested_menu_returns_without_pause(monkeypatch, tmp_path):
     tui.run_tui(path, tmp_path)
 
 
-def test_escape_on_home_keeps_home_open(monkeypatch, tmp_path):
+def test_escape_on_home_closes_interface(monkeypatch, tmp_path):
     path = tmp_path / "gateway.toml"
     initialize(tmp_path, path)
-    answers(monkeypatch, ["b", "q"])
+    answers(monkeypatch, ["b"])
     tui.run_tui(path, tmp_path)
 
 
@@ -308,3 +316,91 @@ def test_tui_paid_key_is_saved_without_echo(monkeypatch, tmp_path, capsys):
     record = tui.CredentialStore(tmp_path).get("account:openai-paid")
     assert record["api_key"] == "secret-api-key"
     assert "secret-api-key" not in capsys.readouterr().out
+
+
+def test_subscription_ping_stays_in_section_without_inference(monkeypatch, tmp_path):
+    path = tmp_path / "gateway.toml"
+    initialize(tmp_path, path)
+    answers(monkeypatch, ["1", "p", "claude", "", "b", "q"])
+    calls = []
+    monkeypatch.setattr(tui, "execute", lambda *args, **kwargs: calls.append((args, kwargs)))
+    tui.run_tui(path, tmp_path)
+    assert calls == [((path, tmp_path, "status"), {"backend": "claude"})]
+
+
+def test_empty_llm_text_sends_nothing(monkeypatch, tmp_path):
+    answers(monkeypatch, ["claude", "   "])
+    monkeypatch.setattr(tui, "execute", lambda *args, **kwargs: pytest.fail("Must not send"))
+    with pytest.raises(GatewayError, match="Введите текст"):
+        tui.probe(initial_config(), tmp_path / "gateway.toml", tmp_path)
+
+
+def test_disabled_streaming_needs_no_extra_question(monkeypatch, tmp_path, mixed_config):
+    mixed_config.backends["paid"].api_streaming = False
+    answers(monkeypatch, ["paid", "hello"])
+    calls = []
+    monkeypatch.setattr(tui, "confirm", lambda *args, **kwargs: pytest.fail("No question"))
+    monkeypatch.setattr(tui, "execute", lambda *args, **kwargs: calls.append(kwargs))
+    tui.probe(mixed_config, tmp_path / "gateway.toml", tmp_path)
+    assert calls == [{"backend": "paid", "prompt": "hello", "stream": False}]
+
+
+async def test_stream_error_starts_after_a_newline(monkeypatch, tmp_path, capsys):
+    from argparse import Namespace
+
+    from llm.gateway import cli
+    from llm.gateway.core.models import StreamEvent
+
+    path = tmp_path / "gateway.toml"
+    save_config(initial_config(), path)
+
+    class FailingRouter:
+        def __init__(self, *args):
+            pass
+
+        async def stream(self, *args):
+            yield StreamEvent("delta", text="Часть ответа")
+            raise GatewayError("Соединение прервано")
+
+    monkeypatch.setattr(cli, "Router", FailingRouter)
+    with pytest.raises(GatewayError):
+        await cli.perform(
+            Namespace(command="probe", backend="claude", prompt="Test", stream=True, pretty=True),
+            path,
+            tmp_path,
+        )
+    assert capsys.readouterr().out.endswith("Часть ответа\n")
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_model_output_cannot_execute_terminal_controls(monkeypatch, tmp_path, capsys, stream):
+    from argparse import Namespace
+
+    from llm.gateway import cli
+    from llm.gateway.core.models import Generation, StreamEvent
+
+    text = "Hello\x1b[2J\rWorld\n\ud800"
+
+    class ModelRouter:
+        def __init__(self, *args):
+            pass
+
+        async def stream(self, *args):
+            yield StreamEvent("delta", text=text)
+            yield StreamEvent("done")
+
+        async def generate(self, *args):
+            return Generation(text, None, "stop")
+
+    path = tmp_path / "gateway.toml"
+    save_config(initial_config(), path)
+    monkeypatch.setattr(cli, "Router", ModelRouter)
+    await cli.perform(
+        Namespace(command="probe", backend="claude", prompt="test", stream=stream, pretty=True),
+        path,
+        tmp_path,
+    )
+    output = capsys.readouterr().out
+    assert "Hello\\x1b[2J\\x0dWorld" in output
+    assert "\x1b" not in output and "\r" not in output
+    assert "\\ud800" in output

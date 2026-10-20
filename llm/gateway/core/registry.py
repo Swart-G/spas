@@ -54,6 +54,12 @@ class Registry:
                 "created": 0,
                 "owned_by": "spas",
                 "capabilities": asdict(self.capabilities(alias)),
+                "decision_primitives": (
+                    ["choice", "noul", "score"]
+                    + (["box"] if self.capabilities(alias).decision_box else [])
+                    if self.capabilities(alias).decisions
+                    else []
+                ),
             }
             for alias in self.config.routes
         ]

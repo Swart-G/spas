@@ -29,7 +29,7 @@ def test_timers_advance_during_remote_silence_and_freeze_completed_steps():
         progress.update({"step": "allocate", "status": "running"})
         clock[0] = 12.5
         progress.console.print(progress.render())
-        assert "2.5s" in output.getvalue()
+        assert "2.5 с" in output.getvalue()
         progress.update({"step": "allocate", "status": "done"})
         progress.update(
             {
@@ -52,8 +52,8 @@ def test_timers_advance_during_remote_silence_and_freeze_completed_steps():
         )
         progress.console.print(progress.render())
         text = output.getvalue()
-        assert "50%" in text and "2.0 KiB / 4.0 KiB" in text
-        assert "1.0 KiB/s" in text
+        assert "50%" in text and "2.0 КиБ / 4.0 КиБ" in text
+        assert "1.0 КиБ/с" in text
         assert progress.rows["allocate"].ended == 12.5
         progress.update({"step": "model_download", "status": "done"})
         clock[0] = 20
@@ -167,7 +167,8 @@ def test_retry_countdown_keeps_elapsed_time_and_resets_attempt_speed():
         )
         clock[0] = 182
         progress.console.print(progress.render())
-        assert "Застой скачивания" in output.getvalue() and "повтор через 3s" in output.getvalue()
+        assert "Скачивание не продвигается" in output.getvalue()
+        assert "Повтор через 3 с" in output.getvalue()
         assert progress.rows["model_download"].ended is None
         progress.update(
             {

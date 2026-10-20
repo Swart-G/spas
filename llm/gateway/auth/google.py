@@ -86,7 +86,9 @@ class GoogleAuth:
         async with self.store.lock(key):
             record = self.store.get(key)
             if record and record["provider"] != "google_colab":
-                raise GatewayError("Имя аккаунта уже занято другим провайдером.")
+                raise GatewayError(
+                    "Это имя аккаунта используется для другого сервиса. Выберите другое."
+                )
             if record and record.get("auth_transport") == "cli":
                 raise GatewayError(
                     "Для собственного OAuth-клиента используйте отдельное имя профиля."
@@ -115,7 +117,9 @@ class GoogleAuth:
         async with self.store.lock(key):
             record = self.store.get(key)
             if record and record.get("provider") != "google_colab":
-                raise GatewayError("Имя аккаунта уже занято другим провайдером.")
+                raise GatewayError(
+                    "Это имя аккаунта используется для другого сервиса. Выберите другое."
+                )
             if record and record.get("auth_transport", "api") != "cli":
                 raise GatewayError("Для входа через Colab CLI используйте отдельное имя профиля.")
             record = record or {
@@ -176,7 +180,9 @@ class GoogleAuth:
                 from colab_cli.auth import REMOTE_REDIRECT_URI
 
                 if read_code is None:
-                    raise GatewayError("Выполните вход Google через SPAS TUI.")
+                    raise GatewayError(
+                        "Подключите аккаунт в разделе «Google Colab» → «Аккаунты Google»."
+                    )
                 attempt = ColabCLIAttempt(saved["client_id"], "", redirect_uri=REMOTE_REDIRECT_URI)
                 announce(attempt.authorization_url(saved.get("email"), True))
                 code = read_code()

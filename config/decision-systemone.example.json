@@ -1,0 +1,35 @@
+{
+  "model": "Jev-like-default",
+  "state": {
+    "service": "payments",
+    "incident": "Checkout returns HTTP 503 for all customers. There is no workaround."
+  },
+  "questions": {
+    "incident": {
+      "type": "noul",
+      "instructions": "Is a service currently unavailable?",
+      "criteria": {
+        "true": "A current failure prevents normal service use",
+        "false": "No current service failure is described"
+      }
+    },
+    "team": {
+      "type": "choice",
+      "instructions": "Which team should handle this incident?",
+      "criteria": {
+        "payments": "Payment and checkout failures",
+        "identity": "Login and account access failures",
+        "other": "An incident outside these teams"
+      }
+    },
+    "severity": {
+      "type": "score",
+      "instructions": "Rate the customer impact of this incident",
+      "criteria": [
+        "No customer impact",
+        "Degraded functionality with a working alternative",
+        "Service unavailable without a workaround"
+      ]
+    }
+  }
+}

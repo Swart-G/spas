@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from ..core.decisions import DecisionRequest
 from ..core.errors import GatewayError
 from ..core.models import ChatRequest, StreamEvent
+from ..core.system_one import SystemOneRequest
 from .disconnect import until_disconnect
 
 
@@ -53,7 +54,9 @@ def build_routes(authorize) -> APIRouter:
             except GatewayError as error:
                 await queue.put(error)
             except Exception:
-                await queue.put(GatewayError("Не удалось завершить запрос Gateway.", status=500))
+                await queue.put(
+                    GatewayError("Шлюз не смог завершить запрос. Повторите попытку.", status=500)
+                )
             finally:
                 # Don't block cleanup when a disconnected client stopped consuming the queue.
                 if not asyncio.current_task().cancelling():
@@ -77,7 +80,7 @@ def build_routes(authorize) -> APIRouter:
             raise first
         if first is None:
             await cleanup()
-            raise GatewayError("Провайдер вернул пустой поток.")
+            raise GatewayError("Сервис завершил поток без ответа. Повторите запрос.")
 
         def chunk(delta: dict, finish_reason: str | None = None) -> str:
             data = {
@@ -131,7 +134,7 @@ def build_routes(authorize) -> APIRouter:
         )
 
     @routes.post("/decisions")
-    async def decisions(body: DecisionRequest, request: Request):
+    async def decisions(body: DecisionRequest | SystemOneRequest, request: Request):
         return await until_disconnect(
             request, request.app.state.router.decide(body, "decision-" + uuid.uuid4().hex)
         )

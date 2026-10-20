@@ -3,6 +3,7 @@ import pytest
 
 from llm.gateway.cli import save_config
 from llm.gateway.config import BackendConfig, GatewayConfig
+from llm.gateway.core.errors import GatewayError
 from llm.gateway.main import GatewayKeys, create_app
 
 KEYS = GatewayKeys(client="client-gateway-key-123456789", admin="admin-gateway-key-123456789")
@@ -77,3 +78,39 @@ async def test_reload_rejects_modifying_busy_backend_and_invalid_config(gateway)
     assert invalid.status_code == 400 and invalid.json()["error"]["code"] == "invalid_config"
     assert app.state.router is previous_router
     assert "private-token" not in invalid.text
+
+
+@pytest.mark.parametrize("mutation", ["deleted", "invalid", "changed"])
+def test_config_conflict_does_not_run_credential_callback(tmp_path, mutation):
+    config = GatewayConfig(backends={}, routes={})
+    path = tmp_path / "gateway.toml"
+    save_config(config, path)
+    if mutation == "deleted":
+        path.unlink()
+    elif mutation == "invalid":
+        path.write_text("invalid TOML")
+    else:
+        updated = config.model_copy(update={"fallback_on": []})
+        save_config(updated, path)
+    callbacks = []
+    with pytest.raises(GatewayError) as caught:
+        save_config(config, path, expected=config, before_write=lambda: callbacks.append("auth"))
+    assert caught.value.code == "config_changed"
+    assert callbacks == []
+
+
+def test_failed_credential_callback_releases_config_lock(tmp_path):
+    config = GatewayConfig(backends={}, routes={})
+    path = tmp_path / "gateway.toml"
+    save_config(config, path)
+    original = path.read_bytes()
+
+    def fail():
+        raise GatewayError("Profile conflict", code="account_exists", status=409)
+
+    with pytest.raises(GatewayError):
+        save_config(config, path, expected=config, before_write=fail)
+    assert path.read_bytes() == original
+    updated = config.model_copy(update={"fallback_on": []})
+    save_config(updated, path, expected=config)
+    assert GatewayConfig.load(path) == updated

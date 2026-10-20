@@ -9,6 +9,7 @@ from .decisions import validate_result
 from .errors import GatewayError
 from .models import ChatRequest, Generation, StreamEvent
 from .registry import Registry
+from .system_one import SystemOneRequest, from_native_result, to_native, validate_system_result
 
 
 class Router:
@@ -29,13 +30,34 @@ class Router:
         return Generation("".join(pieces), terminal.usage, terminal.finish_reason)
 
     async def decide(self, request, request_id):
-        if not self.registry.capabilities(request.model).decisions:
+        capabilities = self.registry.capabilities(request.model)
+        if not capabilities.decisions:
             raise GatewayError(
                 "Маршрут не поддерживает типизированные решения.",
                 code="unsupported_parameter",
                 status=400,
             )
         backends = self.registry.resolve(request.model)
+        system_one = isinstance(request, SystemOneRequest)
+        if (
+            system_one
+            and any(q.type == "box" for q in request.questions.values())
+            and not capabilities.decision_box
+        ):
+            raise GatewayError(
+                "Маршрут не поддерживает Box. Выберите модель с поддержкой Box.",
+                code="unsupported_parameter",
+                status=400,
+            )
+        native = (
+            to_native(request)
+            if system_one
+            and any(
+                backend.config.provider in {"remote_inference", "colab_managed"}
+                for backend in backends
+            )
+            else None
+        )
         for index, backend in enumerate(backends):
             started = time.monotonic()
             recorded = False
@@ -46,8 +68,19 @@ class Router:
                         async with backend.semaphore:
                             self.auth.check_cooldown(backend.config.account)
                             try:
-                                result = validate_result(
-                                    await backend.provider.decide(request), request
+                                native_backend = native is not None and backend.config.provider in {
+                                    "remote_inference",
+                                    "colab_managed",
+                                }
+                                data = await backend.provider.decide(
+                                    native if native_backend else request
+                                )
+                                result = (
+                                    from_native_result(data, request)
+                                    if native_backend
+                                    else validate_system_result(data, request)
+                                    if system_one
+                                    else validate_result(data, request)
                                 )
                             except GatewayError as error:
                                 await self.auth.note_result(backend.config.account, error)
@@ -57,7 +90,10 @@ class Router:
                             recorded = True
                 except TimeoutError as error:
                     raise GatewayError(
-                        "Истекло время ожидания backend.", code="provider_timeout", status=504
+                        "Модель не ответила за отведённое время. "
+                        "Повторите запрос или увеличьте время ожидания.",
+                        code="provider_timeout",
+                        status=504,
                     ) from error
                 self.audit.record(
                     request_id=request_id,
@@ -107,7 +143,7 @@ class Router:
                                     async for event in events:
                                         if terminal is not None:
                                             raise GatewayError(
-                                                "Провайдер продолжил завершённый ответ."
+                                                "Сервис нарушил порядок ответа. Повторите запрос."
                                             )
                                         if event.kind == "done":
                                             terminal = event
@@ -116,7 +152,7 @@ class Router:
                                             yield event
                                 if terminal is None:
                                     raise GatewayError(
-                                        "Провайдер не подтвердил результат.",
+                                        "Сервис не подтвердил завершение ответа. Повторите запрос.",
                                         code="provider_incomplete",
                                         status=502,
                                     )
@@ -129,7 +165,10 @@ class Router:
                             result_recorded = True
                 except TimeoutError as error:
                     raise GatewayError(
-                        "Истекло время ожидания backend.", code="provider_timeout", status=504
+                        "Модель не ответила за отведённое время. "
+                        "Повторите запрос или увеличьте время ожидания.",
+                        code="provider_timeout",
+                        status=504,
                     ) from error
                 self.audit.record(
                     request_id=request_id,

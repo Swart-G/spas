@@ -32,7 +32,7 @@ class AuthManager:
         record = self.store.get(account_key(account))
         if record is None or record.get("provider") != provider:
             raise GatewayError(
-                "Аккаунт этого провайдера не подключён. Выполните вход через spas-llm.",
+                "Доступ к сервису не настроен. Подключите аккаунт или сохраните API-ключ.",
                 code="reauth_required",
             )
         return record
@@ -69,7 +69,7 @@ class AuthManager:
         remaining = record.get("retry_at", 0) - time.time()
         if remaining > 0:
             raise GatewayError(
-                "Backend ожидает восстановления лимита.",
+                "Лимит запросов исчерпан. Дождитесь его восстановления.",
                 code="rate_limited",
                 status=429,
                 retry_after=remaining,
@@ -98,7 +98,12 @@ class AuthManager:
                 )
             elif error.code == "reauth_required":
                 record["state"] = AccountState.REAUTH_REQUIRED
-            elif record.get("provider") in {"remote_inference", "colab_managed"}:
+            elif record.get("provider") in {
+                "remote_inference",
+                "colab_managed",
+                "openai_api",
+                "openai_compatible",
+            }:
                 record["state"] = AccountState.DISCONNECTED
             else:
                 return
@@ -116,7 +121,7 @@ class AuthManager:
                 "state": AccountState.REAUTH_REQUIRED,
             }
             if saved["provider"] != "codex_subscription":
-                raise GatewayError("Это имя уже используется другим провайдером.")
+                raise GatewayError("Это имя уже используется для другого сервиса. Выберите другое.")
             attempt = OAuthAttempt(
                 saved.get("client_id", "dynamic_agent_client"), self.store.host_id()
             )
@@ -191,11 +196,16 @@ class AuthManager:
             if record.get("state") == AccountState.REAUTH_REQUIRED or not record.get(
                 "access_token"
             ):
-                raise GatewayError("Нужен повторный вход в ChatGPT.", code="reauth_required")
+                raise GatewayError(
+                    "Сессия ChatGPT недействительна. Войдите в аккаунт снова.",
+                    code="reauth_required",
+                )
             if record.get("expires_at", 0) > time.time() + 60:
                 return record["access_token"]
             if not record.get("refresh_token"):
-                raise GatewayError("OAuth-сессия истекла; выполните вход.", code="reauth_required")
+                raise GatewayError(
+                    "Срок действия сессии истёк. Войдите в аккаунт снова.", code="reauth_required"
+                )
             try:
                 tokens = await self.oauth.token_request(
                     {
@@ -209,7 +219,7 @@ class AuthManager:
                     record = self._clear_tokens(record)
                     self.store.put(key, record)
                     raise GatewayError(
-                        "OAuth-сессия отозвана; выполните вход.", code="reauth_required"
+                        "Доступ отозван. Войдите в аккаунт снова.", code="reauth_required"
                     ) from error
                 raise
             if tokens.get("id_token"):
@@ -261,22 +271,49 @@ class AuthManager:
             self.store.put(key, self._clear_tokens(record))
             return revoked
 
-    async def save_api_key(self, account: str, api_key: str) -> None:
+    async def save_api_key(
+        self,
+        account: str,
+        api_key: str,
+        *,
+        provider: str = "openai_api",
+        no_auth: bool = False,
+        create_only: bool = False,
+    ) -> None:
+        if provider not in {"openai_api", "openai_compatible"}:
+            raise GatewayError("Выберите сервис для подключения по API.", status=400)
+        api_key = api_key.strip()
+        if (not api_key and not no_auth) or (api_key and no_auth):
+            raise GatewayError("Укажите API-ключ или явно выберите доступ без ключа.", status=400)
+        if any(ord(char) < 32 or ord(char) > 126 for char in api_key):
+            raise GatewayError("API-ключ содержит недопустимые символы.", status=400)
         key = account_key(account)
         async with self.store.lock(key):
             existing = self.store.get(key)
-            if existing and existing["provider"] != "openai_api":
-                raise GatewayError("Это имя уже используется другим провайдером.")
-            if not api_key.strip():
-                raise GatewayError("API-ключ пуст.", code="invalid_account", status=400)
+            if create_only and existing is not None:
+                raise GatewayError(
+                    "Профиль доступа уже занят. Повторите настройку подключения.",
+                    code="account_exists",
+                    status=409,
+                )
+            if existing and existing["provider"] != provider:
+                raise GatewayError("Это имя уже используется для другого сервиса. Выберите другое.")
+            if (
+                existing
+                and existing.get("api_key") == api_key
+                and bool(existing.get("no_auth")) == no_auth
+                and existing.get("state") != AccountState.REAUTH_REQUIRED
+            ):
+                return
             self.store.put(
                 key,
                 {
                     "kind": "account",
                     "account": account,
-                    "provider": "openai_api",
+                    "provider": provider,
                     "state": AccountState.CONNECTED,
-                    "api_key": api_key.strip(),
+                    "api_key": api_key,
+                    "no_auth": no_auth,
                 },
             )
 
@@ -285,7 +322,7 @@ class AuthManager:
         async with self.store.lock(key):
             existing = self.store.get(key)
             if existing and existing["provider"] != "remote_inference":
-                raise GatewayError("Это имя уже используется другим провайдером.")
+                raise GatewayError("Это имя уже используется для другого сервиса. Выберите другое.")
             if existing and existing.get("api_key", "") == api_key.strip():
                 return
             self.store.put(

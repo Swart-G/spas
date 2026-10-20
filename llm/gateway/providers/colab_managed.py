@@ -29,7 +29,7 @@ class ColabManagedAdapter(RemoteInferenceAdapter):
             "VERIFYING",
         }:
             raise GatewayError(
-                "Модель Colab сейчас не готова. Проверьте состояние VM или дождитесь запуска.",
+                "Модель в Colab ещё не готова. Дождитесь запуска или проверьте состояние среды.",
                 code="provider_unavailable",
                 status=503,
                 retry_after=15,
@@ -72,6 +72,7 @@ class ColabManagedAdapter(RemoteInferenceAdapter):
         settings = DeploymentSettings.model_validate(record["settings"])
         bridge = await self.manager.connect(self.config.account)
         terminal, usage, confirmed = None, None, False
+        refused = False
         code = inference_script(settings.port, record["server_key"], payload)
         async with aclosing(
             bridge.execute(code, wait_seconds=self.config.timeout_seconds)
@@ -105,7 +106,7 @@ class ColabManagedAdapter(RemoteInferenceAdapter):
                             raise invalid_response()
                         choice = choices[0]
                         terminal = finish_reason(choice.get("finish_reason"))
-                        text = self._text(choice.get("message"))
+                        text, refused = self._message_parts(choice.get("message"))
                         confirmed = True
                         if text:
                             yield StreamEvent("delta", text=text)
@@ -113,7 +114,8 @@ class ColabManagedAdapter(RemoteInferenceAdapter):
                         if not request.stream or terminal is not None:
                             raise invalid_response()
                         choice = choices[0]
-                        text = self._text(choice.get("delta", {}))
+                        text, part_refused = self._message_parts(choice.get("delta", {}))
+                        refused |= part_refused
                         if choice.get("finish_reason") is not None:
                             terminal = finish_reason(choice["finish_reason"])
                         if text:
@@ -124,7 +126,9 @@ class ColabManagedAdapter(RemoteInferenceAdapter):
             raise GatewayError(
                 "Соединение Colab не подтвердило ответ.", code="provider_incomplete", status=502
             )
-        yield StreamEvent("done", usage=usage, finish_reason=terminal)
+        yield StreamEvent(
+            "done", usage=usage, finish_reason="content_filter" if refused else terminal
+        )
 
     async def list_models(self):
         return await self.manager.models(self.config.account)

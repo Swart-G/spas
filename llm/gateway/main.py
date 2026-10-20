@@ -27,6 +27,7 @@ from .providers.claude_subscription import ClaudeSubscriptionAdapter
 from .providers.codex_subscription import CodexSubscriptionAdapter
 from .providers.colab_managed import ColabManagedAdapter
 from .providers.openai_api import OpenAIAPIAdapter
+from .providers.openai_compatible import OpenAICompatibleAdapter
 from .providers.remote_inference import RemoteInferenceAdapter
 
 
@@ -61,6 +62,8 @@ def make_registry(config: GatewayConfig, auth: AuthManager, client: httpx.AsyncC
             provider = RemoteInferenceAdapter(client, auth, backend)
         elif backend.provider == "colab_managed":
             provider = ColabManagedAdapter(client, auth, backend)
+        elif backend.provider == "openai_compatible":
+            provider = OpenAICompatibleAdapter(client, auth, backend)
         else:
             provider = OpenAIAPIAdapter(client, auth, backend)
         providers[name] = provider
@@ -114,7 +117,7 @@ def create_app(
             audit.close()
 
     app = FastAPI(
-        title="СПАС LLM Gateway",
+        title="СПАС — шлюз моделей",
         version="0.1.0",
         lifespan=lifespan,
         docs_url=None,
@@ -133,7 +136,7 @@ def create_app(
             updated = GatewayConfig.load(config_path)
         except (OSError, ValueError) as error:
             raise GatewayError(
-                "Не удалось прочитать сохранённые настройки Gateway.",
+                "Не удалось прочитать настройки шлюза. Проверьте файл конфигурации.",
                 code="invalid_config",
                 status=400,
             ) from error
@@ -166,7 +169,7 @@ def create_app(
                 or not hmac.compare_digest(value.encode(), expected_key.encode())
             ):
                 raise GatewayError(
-                    "Неверный ключ доступа к Gateway.", code="invalid_gateway_key", status=401
+                    "Неверный ключ доступа к шлюзу.", code="invalid_gateway_key", status=401
                 )
 
         return authorize
@@ -201,7 +204,9 @@ def create_app(
 
     @app.exception_handler(Exception)
     async def internal_error(request: Request, error: Exception) -> JSONResponse:
-        public = GatewayError("Внутренняя ошибка Gateway.", code="internal_error", status=500)
+        public = GatewayError(
+            "Шлюз не смог обработать запрос. Повторите попытку.", code="internal_error", status=500
+        )
         return JSONResponse(public.as_dict(), status_code=500)
 
     return app
