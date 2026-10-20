@@ -1,6 +1,12 @@
+.venv/
+venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
-.venv/
-venv/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
 .env
+.spas/
+config/llm-gateway.toml
