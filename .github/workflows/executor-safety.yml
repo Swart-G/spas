@@ -1,0 +1,83 @@
+name: Executor safety
+
+on:
+  push:
+    paths:
+      - 'executer/**'
+      - 'shared/contracts/safety.py'
+      - 'tests/test_safety_checker.py'
+      - 'tests/test_agent_permissions.py'
+      - 'tests/test_executor*.py'
+      - 'tests/typecheck_executor_port.py'
+      - 'scripts/check_executor_integration.py'
+      - 'requirements*.txt'
+      - 'pyproject.toml'
+      - '.github/workflows/executor-safety.yml'
+  pull_request:
+    paths:
+      - 'executer/**'
+      - 'shared/contracts/safety.py'
+      - 'tests/test_safety_checker.py'
+      - 'tests/test_agent_permissions.py'
+      - 'tests/test_executor*.py'
+      - 'tests/typecheck_executor_port.py'
+      - 'scripts/check_executor_integration.py'
+      - 'requirements*.txt'
+      - 'pyproject.toml'
+      - '.github/workflows/executor-safety.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: executor-safety-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-safety-dev.txt
+      - run: python -m pip install -r requirements-safety-dev.txt
+      - name: Checker, agent permissions, MCP, Runner, Audit Log and mypy
+        run: python scripts/check_executor_integration.py
+      - name: Lint safety components
+        run: >-
+          ruff check executer/safety_checker shared/contracts/safety.py
+          executer/server_mcp/Server.py executer/server_mcp/Manual.py
+          executer/server_mcp/Logging.py executer/server_mcp/Smoke_test.py
+          tests/test_safety_checker.py tests/test_agent_permissions.py
+          tests/test_executor.py tests/test_executor_integration.py
+          tests/typecheck_executor_port.py scripts/check_executor_integration.py
+      - name: Validate launcher syntax
+        run: bash -n executer/server_mcp/Run_docker.sh
+
+  docker-smoke:
+    needs: security-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt
+      - name: Build restricted Executor image
+        run: docker build -f executer/server_mcp/Dockerfile -t spas-executor:ci .
+      - name: Real MCP sessions and Docker restrictions
+        env:
+          EXECUTOR_IMAGE: spas-executor:ci
+        run: python -m executer.server_mcp.Smoke_test

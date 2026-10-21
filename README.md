@@ -71,20 +71,19 @@ Resolved / Replan / Re-diagnosis
 - Доступ к LLM настраивается через Gateway, что позволяет использовать различных провайдеров.
 - Мультиагентная система позволяет разделить процесс обработки инцидента, что делает поведение системы более стабильным и контролируемым.
 
-## Rule-based Safety Checker
+## Safety Checker и права агентов
 
-Асинхронный `RuleBasedSafetyChecker.check(argv, context)` принимает `list[str]`
-без повторного разбора команды. Неизвестные программы и неподдерживаемые
-аргументы Docker запрещены. Ответ: `decision` и `reason`.
+Асинхронный checker принимает argv (`list[str]`) и возвращает `decision` и `reason`.
+Executor назначает роль при запуске: Diagnostic только читает, Worker запрашивает
+действия по политике. Контекст команды не может изменить роль или подтвердить запуск.
 [Правила и подключение](executer/safety_checker/SAFETY_CHECKER.md).
 
-Тесты из корня репозитория (Python 3.10+, без внешних зависимостей):
+Проверка безопасности, интеграции MCP/Runner/Audit Log и типов (Python 3.12+):
 
 ```sh
-python3 -m unittest discover -s tests -v
+python3 -m pip install -r requirements-safety-dev.txt
+python3 scripts/check_executor_integration.py
 ```
 
-Для проверки с отдельным checkout Executor установите его зависимости и mypy,
-затем запустите `python3 scripts/check_executor_integration.py /path/to/executor`.
-Скрипт проверяет оба компонента в одном временном каталоге, не меняя исходники.
-Переход Runner и входной модели Executor на argv выполняется на его стороне.
+CI запускает эти проверки на Python 3.12/3.13, Ruff и настоящие MCP-сеансы в Docker.
+API-ключи и модели для тестов не нужны.

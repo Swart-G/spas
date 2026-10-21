@@ -46,3 +46,6 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 "llm/gateway/auth/claude.py" = ["ASYNC240"]
 # Fixed remote cells include embedded Python programs and HTTP URLs.
 "llm/gateway/colab/scripts.py" = ["E501"]
+
+# Preserve the public string-enum behavior of existing safety contracts.
+"shared/contracts/safety.py" = ["UP042"]
