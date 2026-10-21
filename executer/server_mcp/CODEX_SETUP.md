@@ -50,7 +50,7 @@ API и ручная консоль вызывают один инструмен�
 здесь он явно отключается. Ограничения Docker и пользователь команды остаются.
 
 ```sh
-bash executer/server_mcp/Run_docker.sh --manual --without-safety
+bash executer/server_mcp/Run_docker.sh --manual --agent-role worker --without-safety
 ```
 
 Вводить по одной строке в `executor>`:
@@ -231,3 +231,12 @@ docker run --rm --network none --read-only \
 - `Protected Docker execution is required`: использовать Run_docker.sh, а не запускать Runner непосредственно на хосте.
 - `denied`: посмотреть error; проверить точный путь и политику. Это штатный результат checker.
 - Ошибка политики при старте: проверить JSON, права чтения, путь; сервер намеренно не переходит в режим без проверки.
+
+## Роль агента
+
+По умолчанию запускается Diagnostic. Для Worker оператор добавляет
+`--agent-role worker` после пути `Run_docker.sh` в настройке его MCP-клиента.
+Это разные серверы/соединения: Diagnostic нельзя выдавать доступ к серверу Worker.
+Роль не берётся из контекста команды, дополнительные поля прав отклоняются.
+Worker также проходит checker; `REQUIRE_APPROVAL` не разрешает запуск.
+[Политика ролей и тесты](../safety_checker/SAFETY_CHECKER.md).

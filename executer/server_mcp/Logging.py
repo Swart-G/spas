@@ -1,16 +1,15 @@
 """Структурированные журналы Executor: файл с ротацией и stderr для MCP."""
 
-from contextvars import ContextVar
-from datetime import datetime, timezone
 import json
 import logging
-from logging.handlers import RotatingFileHandler
 import os
 import socket
-from pathlib import Path
 import sys
 import threading
-
+from contextvars import ContextVar
+from datetime import UTC, datetime
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REQUEST_CONTEXT: ContextVar[dict | None] = ContextVar("executor_request", default=None)
@@ -20,10 +19,24 @@ MAX_LOG_BYTES = 2 * 1024 * 1024
 BACKUP_COUNT = 3
 # Только технические поля. command, reason, stdout/stderr и ключи сюда не входят.
 FIELDS = (
-    "request_id", "incident_ref", "pid", "mode", "transport", "status",
-    "exit_code", "duration_ms", "command_length", "safety_checked", "decision",
-    "timeout_seconds", "stdout_bytes", "stderr_bytes", "stdout_truncated",
-    "stderr_truncated", "tool",
+    "request_id",
+    "incident_ref",
+    "agent_role",
+    "pid",
+    "mode",
+    "transport",
+    "status",
+    "exit_code",
+    "duration_ms",
+    "command_length",
+    "safety_checked",
+    "decision",
+    "timeout_seconds",
+    "stdout_bytes",
+    "stderr_bytes",
+    "stdout_truncated",
+    "stderr_truncated",
+    "tool",
     "sdk_component",
 )
 
@@ -33,7 +46,9 @@ class JsonFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         data = {
-            "timestamp": datetime.fromtimestamp(record.created, timezone.utc).isoformat(timespec="milliseconds"),
+            "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(
+                timespec="milliseconds"
+            ),
             "level": record.levelname,
             "logger": record.name,
             "server_pid": record.process,
@@ -63,14 +78,18 @@ class JsonFormatter(logging.Formatter):
                 frames = []
                 tb = error.__traceback__
                 while tb is not None:
-                    frames.append({
-                        "file": Path(tb.tb_frame.f_code.co_filename).name[:120],
-                        "line": tb.tb_lineno,
-                        "function": tb.tb_frame.f_code.co_name[:80],
-                    })
+                    frames.append(
+                        {
+                            "file": Path(tb.tb_frame.f_code.co_filename).name[:120],
+                            "line": tb.tb_lineno,
+                            "function": tb.tb_frame.f_code.co_name[:80],
+                        }
+                    )
                     tb = tb.tb_next
                 errors.append({"type": type(error).__name__, "frames": frames[-12:]})
-                cause = error.__cause__ or (None if error.__suppress_context__ else error.__context__)
+                cause = error.__cause__ or (
+                    None if error.__suppress_context__ else error.__context__
+                )
                 if cause is not None:
                     pending.append(cause)
             data["exceptions"] = errors
@@ -80,10 +99,17 @@ class JsonFormatter(logging.Formatter):
 def _report_file_failure() -> None:
     """Не вызываем logging повторно из сломанного обработчика."""
     try:
-        sys.stderr.write(json.dumps({
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-            "level": "ERROR", "event": "log_file_write_failed", "server_pid": os.getpid(),
-        }) + "\n")
+        sys.stderr.write(
+            json.dumps(
+                {
+                    "timestamp": datetime.now(UTC).isoformat(timespec="milliseconds"),
+                    "level": "ERROR",
+                    "event": "log_file_write_failed",
+                    "server_pid": os.getpid(),
+                }
+            )
+            + "\n"
+        )
         sys.stderr.flush()
     except Exception:
         pass
@@ -123,7 +149,9 @@ class SDKLogHandler(logging.Handler):
 
     def emit(self, record):
         logging.getLogger("executor.sdk").log(
-            record.levelno, "mcp_sdk_event", exc_info=record.exc_info,
+            record.levelno,
+            "mcp_sdk_event",
+            exc_info=record.exc_info,
             extra={"sdk_component": record.name[:160]},
         )
 
@@ -142,7 +170,9 @@ def setup_logging() -> logging.Logger:
         console.setFormatter(formatter)
         logger.addHandler(console)
         try:
-            log_dir = Path(os.environ.get("EXECUTOR_LOG_DIR") or PROJECT_ROOT / "logs" / "executor").expanduser()
+            log_dir = Path(
+                os.environ.get("EXECUTOR_LOG_DIR") or PROJECT_ROOT / "logs" / "executor"
+            ).expanduser()
             if Path("/etc/spas-executor").is_file():
                 # PID одинаковых серверов в разных контейнерах может совпасть.
                 log_dir = log_dir / socket.gethostname()

@@ -5,11 +5,16 @@ set -euo pipefail
 image="${EXECUTOR_IMAGE:-spas-executor:local}"
 entry=(python -m executer.server_mcp.Server)
 args=()
-for argument in "$@"; do
-    case "$argument" in
-        --manual) entry=(python -m executer.server_mcp.Manual) ;;
-        --without-safety) args+=(--without-safety) ;;
-        *) printf 'Unknown argument: %s\n' "$argument" >&2; exit 2 ;;
+while (($#)); do
+    case "$1" in
+        --manual) entry=(python -m executer.server_mcp.Manual); shift ;;
+        --without-safety) args+=(--without-safety); shift ;;
+        --agent-role)
+            [[ $# -ge 2 && ( "$2" == diagnostic || "$2" == worker ) ]] || {
+                printf 'Expected --agent-role diagnostic|worker\n' >&2; exit 2;
+            }
+            args+=(--agent-role "$2"); shift 2 ;;
+        *) printf 'Unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
 
@@ -27,6 +32,8 @@ if [[ -n "${EXECUTOR_POLICY_FILE:-}" ]]; then
              --env EXECUTOR_POLICY_FILE=/etc/executor-policy.json)
 fi
 
+# Bash 3.2 (macOS) treats empty arrays as unset under set -u.
+# The guarded expansions below preserve literal argv on both Bash 3.2 and 5.x.
 # Не добавлять -t: терминальное форматирование ломает MCP stdio.
 # Данные /workspace временные; журнал сохраняется в отдельном Docker volume.
 exec docker run --rm -i --init \
@@ -41,6 +48,6 @@ exec docker run --rm -i --init \
     --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700 \
     --tmpfs /dev/shm:rw,noexec,nosuid,nodev,size=1m,mode=0700 \
     --mount type=volume,src=spas-executor-logs,dst=/var/log/executor \
-    "${mounts[@]}" \
+    ${mounts[@]+"${mounts[@]}"} \
     --entrypoint "${entry[0]}" \
-    "$image" "${entry[@]:1}" "${args[@]}"
+    "$image" "${entry[@]:1}" ${args[@]+"${args[@]}"}

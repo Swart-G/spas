@@ -1,14 +1,14 @@
 """Регрессии границы checker/Runner и ограниченного вывода. Запуска команд на хосте нет."""
 
 import asyncio
-from contextlib import redirect_stdout, redirect_stderr
 import io
 import json
 import logging
-from pathlib import Path
-from types import SimpleNamespace
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from mcp.server.mcpserver.exceptions import ToolError
@@ -16,12 +16,17 @@ from mcp_types import CallToolRequestParams
 from pydantic import TypeAdapter, ValidationError
 
 from executer.safety_checker import RuleBasedSafetyChecker, SafetyPolicy
-from executer.server_mcp import Server, Runner, Manual
-from executer.server_mcp.Logging import JsonFormatter, PrivateRotatingFileHandler
-from executer.server_mcp.Logging import setup_logging, shutdown_logging
+from executer.safety_checker.permissions import AgentRole
+from executer.server_mcp import Manual, Runner, Server
+from executer.server_mcp.Configuration import load_checker
+from executer.server_mcp.Logging import (
+    JsonFormatter,
+    PrivateRotatingFileHandler,
+    setup_logging,
+    shutdown_logging,
+)
 from executer.server_mcp.Models import Command, ExecutionResult
 from executer.server_mcp.Runner import read_limited
-from executer.server_mcp.Configuration import load_checker
 
 CONTEXT = {"incident_id": "test-incident", "reason": "Integration test"}
 
@@ -33,15 +38,18 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
         prior = (sdk.handlers[:], sdk.level, sdk.propagate)
         captured = io.StringIO()
         marker = "PRIVATE-INPUT-\x1b[2J-" + "x" * 5000
-        with tempfile.TemporaryDirectory() as directory, \
-             patch.dict("os.environ", {"EXECUTOR_LOG_DIR": directory}), \
-             redirect_stderr(captured):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict("os.environ", {"EXECUTOR_LOG_DIR": directory}),
+            redirect_stderr(captured),
+        ):
             try:
                 server = Server.create_server()
                 root_handlers = logging.getLogger().handlers[:]
                 # Реальный обработчик SDK повторно журналирует имя инструмента.
                 result = await server._handle_call_tool(
-                    None, CallToolRequestParams(name=marker, arguments={}),
+                    None,
+                    CallToolRequestParams(name=marker, arguments={}),
                 )
                 self.assertTrue(result.is_error)
                 self.assertNotIn("PRIVATE-INPUT", str(result))
@@ -52,7 +60,8 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
                 setup_logging()  # Повторная настройка не дублирует события.
             finally:
                 shutdown_logging()
-            outputs = [captured.getvalue(), *(p.read_text() for p in Path(directory).glob("*.log"))]
+            # Small temporary log fixtures, outside the server execution path.
+            outputs = [captured.getvalue(), *(p.read_text() for p in Path(directory).glob("*.log"))]  # noqa: ASYNC240
             self.assertGreater(len(outputs), 1)
             for output in outputs:
                 self.assertNotIn("PRIVATE-INPUT", output)
@@ -67,14 +76,18 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
     async def test_busy_before_checker_and_recovery_after_cancel(self):
         started = asyncio.Event()
         release = asyncio.Event()
+
         async def check(command, context):
             started.set()
             await release.wait()
             return {"decision": "ALLOW", "reason": "test"}
+
         checker = SimpleNamespace(check=AsyncMock(side_effect=check))
         server = Server.create_server(checker=checker)
         payload = {"command": ["pwd"], "context": CONTEXT}
-        with patch.object(Server, "run_command", AsyncMock(return_value=ExecutionResult(status="succeeded"))) as run:
+        with patch.object(
+            Server, "run_command", AsyncMock(return_value=ExecutionResult(status="succeeded"))
+        ) as run:
             task = asyncio.create_task(server.call_tool("execute_command", payload))
             await asyncio.wait_for(started.wait(), 1)
             result = await asyncio.wait_for(server.call_tool("execute_command", payload), 1)
@@ -94,13 +107,19 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_manual_terminal_controls_are_visible_and_mcp_data_unchanged(self):
         payload = "Привет 😀 👩‍💻\n\ttext\x1b[2J\x1b]0;title\x07\x9b31m\r\b\u202eevil\u2066end"
-        data = ExecutionResult(status="failed", stdout=payload, stderr=payload,
-                               error=payload, exit_code=1).model_dump()
-        server = SimpleNamespace(call_tool=AsyncMock(return_value=SimpleNamespace(structured_content=data)))
+        data = ExecutionResult(
+            status="failed", stdout=payload, stderr=payload, error=payload, exit_code=1
+        ).model_dump()
+        server = SimpleNamespace(
+            call_tool=AsyncMock(return_value=SimpleNamespace(structured_content=data))
+        )
         out, err = io.StringIO(), io.StringIO()
-        with patch.object(Manual, "configured_server", return_value=server), \
-             patch("builtins.input", side_effect=["cat /inputs/log.txt", "quit"]), \
-             redirect_stdout(out), redirect_stderr(err):
+        with (
+            patch.object(Manual, "configured_server", return_value=server),
+            patch("builtins.input", side_effect=["cat /inputs/log.txt", "quit"]),
+            redirect_stdout(out),
+            redirect_stderr(err),
+        ):
             await Manual.run_manual()
         for output in (out.getvalue(), err.getvalue()):
             self.assertIn("Привет 😀 👩‍💻\n\ttext", output)
@@ -113,23 +132,30 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
     async def test_manual_tool_errors_cannot_control_terminal(self):
         server = SimpleNamespace(call_tool=AsyncMock(side_effect=ToolError("bad\x1b[2J\x9b31m")))
         out, err = io.StringIO(), io.StringIO()
-        with patch.object(Manual, "configured_server", return_value=server), \
-             patch("builtins.input", side_effect=["pwd", "quit"]), \
-             redirect_stdout(out), redirect_stderr(err):
+        with (
+            patch.object(Manual, "configured_server", return_value=server),
+            patch("builtins.input", side_effect=["pwd", "quit"]),
+            redirect_stdout(out),
+            redirect_stderr(err),
+        ):
             await Manual.run_manual()
         self.assertNotIn("\x1b", err.getvalue())
         self.assertNotIn("\x9b", err.getvalue())
         self.assertIn(r"bad\x1b[2J\x9b31m", err.getvalue())
 
     async def call(self, checker, argv):
-        server = Server.create_server(checker=checker)
+        server = Server.create_server(checker=checker, agent_role=AgentRole.WORKER)
         result = await server.call_tool("execute_command", {"command": argv, "context": CONTEXT})
         return result.structured_content
 
     async def test_allow_preserves_argv_and_context(self):
         checker = RuleBasedSafetyChecker()
-        with patch.object(checker, "check", wraps=checker.check) as check, \
-             patch.object(Server, "run_command", AsyncMock(return_value=ExecutionResult(status="succeeded"))) as run:
+        with (
+            patch.object(checker, "check", wraps=checker.check) as check,
+            patch.object(
+                Server, "run_command", AsyncMock(return_value=ExecutionResult(status="succeeded"))
+            ) as run,
+        ):
             result = await self.call(checker, ["uname", "-a"])
         self.assertTrue(result["safety_checked"])
         self.assertEqual(check.call_args.args[0], ["uname", "-a"])
@@ -142,14 +168,19 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
             async def check(self, command, context):
                 command[:] = ["bash", "-c", "bad"]
                 return {"decision": "ALLOW", "reason": "test"}
-        with patch.object(Server, "run_command", AsyncMock(return_value=ExecutionResult(status="succeeded"))) as run:
+
+        with patch.object(
+            Server, "run_command", AsyncMock(return_value=ExecutionResult(status="succeeded"))
+        ) as run:
             await self.call(MutatingChecker(), ["pwd"])
         self.assertEqual(run.call_args.args, (("pwd",),))
 
     async def test_deny_and_approval_do_not_start_process(self):
         checker = RuleBasedSafetyChecker(SafetyPolicy(containers={"backend"}))
-        for argv, expected in ((["bash", "-c", "pwd"], "denied"),
-                               (["docker", "restart", "--", "backend"], "approval_required")):
+        for argv, expected in (
+            (["bash", "-c", "pwd"], "denied"),
+            (["docker", "restart", "--", "backend"], "approval_required"),
+        ):
             with self.subTest(argv=argv), patch.object(Server, "run_command", AsyncMock()) as run:
                 result = await self.call(checker, argv)
                 run.assert_not_awaited()
@@ -157,11 +188,17 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(result["safety_checked"])
 
     async def test_missing_broken_and_invalid_checker_fail_closed(self):
-        for payload in (None, {"decision": "ALLOW", "reason": "ok", "argv": ["pwd"]},
-                        {"decision": "allow", "reason": "ok"}):
+        for payload in (
+            None,
+            {"decision": "ALLOW", "reason": "ok", "argv": ["pwd"]},
+            {"decision": "allow", "reason": "ok"},
+        ):
             checker = AsyncMock()
             checker.check.return_value = payload
-            with self.subTest(payload=payload), patch.object(Server, "run_command", AsyncMock()) as run:
+            with (
+                self.subTest(payload=payload),
+                patch.object(Server, "run_command", AsyncMock()) as run,
+            ):
                 result = await self.call(checker, ["pwd"])
                 run.assert_not_awaited()
                 self.assertEqual(result["status"], "error")
@@ -178,7 +215,11 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
         class SlowChecker:
             async def check(self, command, context):
                 await asyncio.sleep(60)
-        with patch.object(Server, "run_command", AsyncMock()) as run:
+
+        with (
+            patch.object(Server, "SAFETY_CHECK_TIMEOUT_SECONDS", 0.02),
+            patch.object(Server, "run_command", AsyncMock()) as run,
+        ):
             result = await self.call(SlowChecker(), ["pwd"])
             self.assertEqual(result["status"], "error")
             self.assertIn("timed out", result["error"])
@@ -216,8 +257,9 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancellation_during_spawn_keeps_process_for_cleanup(self):
         spawning, release = asyncio.Event(), asyncio.Event()
-        process = SimpleNamespace(pid=123, returncode=None,
-                                  stdout=asyncio.StreamReader(), stderr=asyncio.StreamReader())
+        process = SimpleNamespace(
+            pid=123, returncode=None, stdout=asyncio.StreamReader(), stderr=asyncio.StreamReader()
+        )
         process.wait = AsyncMock(return_value=-9)
 
         async def spawn(*args, **kwargs):
@@ -230,10 +272,12 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
             process.stdout.feed_eof()
             process.stderr.feed_eof()
 
-        with patch.object(Runner, "subprocess_options", return_value={}), \
-             patch.object(Runner.asyncio, "create_subprocess_exec", side_effect=spawn), \
-             patch.object(Runner, "kill_process_group", side_effect=kill_group) as kill, \
-             patch.object(Runner, "kill_command_processes", return_value=0):
+        with (
+            patch.object(Runner, "subprocess_options", return_value={}),
+            patch.object(Runner.asyncio, "create_subprocess_exec", side_effect=spawn),
+            patch.object(Runner, "kill_process_group", side_effect=kill_group) as kill,
+            patch.object(Runner, "kill_command_processes", return_value=0),
+        ):
             task = asyncio.create_task(Runner.run_command(("fake",)))
             await spawning.wait()
             task.cancel()
@@ -246,8 +290,9 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_busy_rejects_second_spawn_and_cancel_releases_lock(self):
         spawned = asyncio.Event()
-        process = SimpleNamespace(pid=123, returncode=None,
-                                  stdout=asyncio.StreamReader(), stderr=asyncio.StreamReader())
+        process = SimpleNamespace(
+            pid=123, returncode=None, stdout=asyncio.StreamReader(), stderr=asyncio.StreamReader()
+        )
         process.wait = AsyncMock(return_value=-9)
 
         async def spawn(*args, **kwargs):
@@ -259,10 +304,12 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
             process.stdout.feed_eof()
             process.stderr.feed_eof()
 
-        with patch.object(Runner, "subprocess_options", return_value={}), \
-             patch.object(Runner.asyncio, "create_subprocess_exec", side_effect=spawn) as create, \
-             patch.object(Runner, "kill_process_group", side_effect=kill_group), \
-             patch.object(Runner, "kill_command_processes", return_value=0):
+        with (
+            patch.object(Runner, "subprocess_options", return_value={}),
+            patch.object(Runner.asyncio, "create_subprocess_exec", side_effect=spawn) as create,
+            patch.object(Runner, "kill_process_group", side_effect=kill_group),
+            patch.object(Runner, "kill_command_processes", return_value=0),
+        ):
             task = asyncio.create_task(Runner.run_command(("fake",)))
             await spawned.wait()
             result = await Runner.run_command(("second",))
@@ -307,11 +354,13 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
             try:
                 raise ValueError("secret-payload")
             except ValueError as exc:
-                raise ExceptionGroup("secret-group", [ExceptionGroup("nested", [exc])])
+                raise ExceptionGroup("secret-group", [ExceptionGroup("nested", [exc])]) from exc
         except ExceptionGroup:
             import sys
-            record = logging.LogRecord("executor.test", logging.ERROR, __file__, 1,
-                                       "server_failed", (), sys.exc_info())
+
+            record = logging.LogRecord(
+                "executor.test", logging.ERROR, __file__, 1, "server_failed", (), sys.exc_info()
+            )
         formatted = JsonFormatter().format(record)
         data = json.loads(formatted)
         self.assertEqual(data["exceptions"][0]["type"], "ValueError")
@@ -328,8 +377,16 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
                     raise ValueError("secret-marker")
                 except ValueError:
                     import sys
-                    record = logging.LogRecord("executor.test", logging.ERROR, __file__, 1,
-                                               "internal_error", (), sys.exc_info())
+
+                    record = logging.LogRecord(
+                        "executor.test",
+                        logging.ERROR,
+                        __file__,
+                        1,
+                        "internal_error",
+                        (),
+                        sys.exc_info(),
+                    )
                 record.command = "secret-marker"
                 record.stdout = "secret-marker"
                 for _ in range(10):

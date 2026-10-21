@@ -76,11 +76,10 @@ class RuleBasedSafetyChecker:
             raise TypeError("policy must be a SafetyPolicy")
 
     async def check(
-        self, command: list[str] | str, context: ExecutionContextPort,
+        self, command: list[str], context: ExecutionContextPort,
     ) -> dict[str, object]:
         """Check argv without parsing or execution; legacy strings are denied.
 
-        The str annotation also fits the old Executor port during migration.
         Only list[str] is a valid input. Context is metadata, not authorization.
         """
         try:
