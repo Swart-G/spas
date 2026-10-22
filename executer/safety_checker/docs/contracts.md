@@ -88,7 +88,12 @@ Gateway поддерживает их преобразование в native Nim
 
 Дубли ключей JSON, Markdown, лишний текст, противоречивые risk/decision,
 finish_reason≠stop, tool calls/refusal транспорта и повреждённый envelope → DENY.
-Максимум envelope 32768 байт, content 4096 байт.
+Максимум envelope 32768 байт, content 4096 байт. Транспорт запрашивает
+`Accept-Encoding: identity` и до чтения тела отклоняет Content-Encoding,
+отличное от единственного identity. Тело читается сырыми чанками, без распаковки;
+лимит проверяется перед добавлением чанка в буфер, независимо от Content-Length.
+Недопустимый или слишком большой Content-Length также отклоняется до чтения.
+Нарушения дают `invalid_model_output`, DENY/status=error и запрет вызова Executor.
 
 ## Ответ сервиса
 

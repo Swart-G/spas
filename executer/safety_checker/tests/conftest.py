@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from inspect import isawaitable
 
 import httpx
 import pytest
@@ -8,6 +9,24 @@ from safety_analyzer.commands import CommandAnalyzer, configured_rules
 from safety_analyzer.config import Settings
 from safety_analyzer.gateway import LLMGateway
 from safety_analyzer.service import Analyzer
+
+
+def unread_mock_transport(handler):
+    """Match network streaming: Response(json=...) otherwise eagerly consumes its body."""
+
+    async def dispatch(request):
+        response = handler(request)
+        if isawaitable(response):
+            response = await response
+        if response.is_stream_consumed:
+            return httpx.Response(
+                response.status_code,
+                headers=response.headers,
+                stream=httpx.ByteStream(response.content),
+            )
+        return response
+
+    return httpx.MockTransport(dispatch)
 
 
 def completion(content='{"verdict":"safe","categories":[]}', finish_reason="stop"):
@@ -37,7 +56,7 @@ def analyzer_for(settings):
     @asynccontextmanager
     async def factory(handler, **overrides):
         configured = Settings(**(settings.model_dump() | overrides))
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx.AsyncClient(transport=unread_mock_transport(handler)) as client:
             yield Analyzer(LLMGateway(configured, client))
 
     return factory
@@ -49,7 +68,7 @@ def command_analyzer_for(settings):
     async def factory(handler, rules=None, **overrides):
         configured = Settings(**(settings.model_dump() | overrides))
         async with httpx.AsyncClient(
-            transport=httpx.MockTransport(handler), trust_env=False
+            transport=unread_mock_transport(handler), trust_env=False
         ) as client:
             yield CommandAnalyzer(
                 LLMGateway(configured, client),
@@ -64,7 +83,7 @@ def api_for(settings):
     @asynccontextmanager
     async def factory(handler, **overrides):
         configured = Settings(**(settings.model_dump() | overrides))
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as gateway_client:
+        async with httpx.AsyncClient(transport=unread_mock_transport(handler)) as gateway_client:
             app = create_app(configured, gateway_client)
             async with app.router.lifespan_context(app):
                 async with httpx.AsyncClient(

@@ -10,6 +10,11 @@ from safety_analyzer.decision_adapter import OPTIONS
 PROFILES = ("always-allow", "always-deny", "alternating", "unavailable")
 
 
+def _json_response(data: dict) -> httpx.Response:
+    # Real HTTP responses are unread streams; Response(json=...) is eagerly consumed.
+    return httpx.Response(200, stream=httpx.ByteStream(json.dumps(data).encode("utf-8")))
+
+
 def control_transport(profile: str) -> httpx.MockTransport:
     if profile not in PROFILES:
         raise ValueError("unknown control profile")
@@ -34,9 +39,8 @@ def control_transport(profile: str) -> httpx.MockTransport:
         )
         if decisions_api:
             selected = {"decision": decision, "risk": risk, "factor": factor}
-            return httpx.Response(
-                200,
-                json={
+            return _json_response(
+                {
                     "model": payload["model"],
                     "answers": {
                         name: {
@@ -55,9 +59,8 @@ def control_transport(profile: str) -> httpx.MockTransport:
             "factors": [] if allow else [factor],
             "reason": "Evaluation control",
         }
-        return httpx.Response(
-            200,
-            json={
+        return _json_response(
+            {
                 "choices": [
                     {
                         "index": 0,

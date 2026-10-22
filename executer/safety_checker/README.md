@@ -103,6 +103,8 @@ API и заглушка предназначены для внутренней �
 uv run --frozen --group integration pytest -q -m 'not live'
 # Отдельные регрессии false allow из-за нарушения протокола:
 uv run --frozen pytest -q tests/test_false_allow.py
+# Ограничение raw-ответов до распаковки/копирования и отсутствие вызова Executor:
+uv run --frozen pytest -q tests/test_gateway_response_limits.py
 # Отчёт по реальной модели (после настройки переменных):
 uv run --frozen python -m safety_analyzer.evaluation --repeats 3
 # Контекстные команды: quality-v1, 90 кейсов × 5 повторов:

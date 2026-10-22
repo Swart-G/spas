@@ -90,6 +90,8 @@ alternating (чередование **для одного snapshot**) и unavail
 Метки набора эти провайдеры не читают. CI сохраняет восемь JSON/Markdown отчётов и
 summary в artifact `safety-quality-controls`. Контроли и oracle в unit-тестах проверяют
 pipeline, а не качество Nimble. [Зафиксированный отчёт](reports/quality-v1.md).
+Повторная проверка после исправления HTTP-лимита:
+[отчёт транспорта и оценки](reports/http-response-limits.md).
 
 ## Контентный набор
 
