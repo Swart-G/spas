@@ -4,6 +4,7 @@ from uuid import uuid4
 import pytest
 
 from agents.base import BaseSlaveAgent
+from apps.agent_setup import create_stub_orchestrator
 from core.incidents.models import Incident, IncidentStatus
 from core.orchestrator.engine import Orchestrator
 from shared.contracts.messages import AgentResult, RoleEnum, StageEnum
@@ -45,7 +46,7 @@ async def setup_pipeline():
     engine = Orchestrator(agent_timeout=1, cleanup_timeout=1)
     messages = []
     for role in (RoleEnum.TRIAGE, RoleEnum.DIAGNOSTIC, RoleEnum.REMEDIATION):
-        engine.agents[role] = RecordingAgent(role, messages)
+        engine.register_agent(RecordingAgent(role, messages), replace=True)
     incident = await engine.create_incident("DB timeout", "Connections exhausted")
     return engine, incident, messages
 
@@ -75,9 +76,7 @@ async def test_full_cycle_passes_context_and_resolves_only_after_verification():
     assert incident.next_stage is None
     assert [message.stage for message in messages] == STAGES
     assert [result.stage for result in incident.history] == STAGES
-    assert [message.receiver for message in messages] == [
-        role_for(stage) for stage in STAGES
-    ]
+    assert [message.receiver for message in messages] == [role_for(stage) for stage in STAGES]
     assert len({message.message_id for message in messages}) == 4
     assert incident.metrics_log == {"severity": "critical", "connections": 10}
     assert incident.root_cause == OUTPUTS[StageEnum.DIAGNOSIS]["root_cause"]
@@ -125,9 +124,7 @@ async def test_steps_follow_status_transitions_and_resume_mid_cycle():
 @pytest.mark.asyncio
 async def test_concurrent_full_cycles_call_each_stage_once():
     engine, incident, messages = await setup_pipeline()
-    await asyncio.gather(
-        *(engine.process_incident(incident.incident_id) for _ in range(5))
-    )
+    await asyncio.gather(*(engine.process_incident(incident.incident_id) for _ in range(5)))
     assert incident.status == IncidentStatus.RESOLVED
     assert [message.stage for message in messages] == STAGES
 
@@ -173,14 +170,12 @@ async def test_stage_failures_stop_pipeline_without_repeating_actions(stage, fai
                 return result.model_copy(update={"receiver": RoleEnum.TRIAGE})
             if failure == "stage":
                 wrong_stage = (
-                    StageEnum.VERIFICATION
-                    if stage == StageEnum.TRIAGE
-                    else StageEnum.TRIAGE
+                    StageEnum.VERIFICATION if stage == StageEnum.TRIAGE else StageEnum.TRIAGE
                 )
                 return result.model_copy(update={"stage": wrong_stage})
 
     role = role_for(stage)
-    engine.agents[role] = FailingAgent(role, messages)
+    engine.register_agent(FailingAgent(role, messages), replace=True)
     await engine.process_incident(incident.incident_id)
 
     assert incident.status == IncidentStatus.FAILED
@@ -220,7 +215,7 @@ async def test_invalid_success_output_does_not_commit_partial_state(stage, outpu
             result = await super().process(message)
             return result.model_copy(update={"output_data": output})
 
-    engine.agents[role_for(stage)] = InvalidAgent(role_for(stage), messages)
+    engine.register_agent(InvalidAgent(role_for(stage), messages), replace=True)
     await engine.process_incident(incident.incident_id)
     assert incident.status == IncidentStatus.FAILED
     assert incident.last_error
@@ -253,9 +248,7 @@ async def test_negative_verification_records_evidence_and_never_repeats_worker()
                 }
             )
 
-    engine.agents[RoleEnum.DIAGNOSTIC] = NegativeVerification(
-        RoleEnum.DIAGNOSTIC, messages
-    )
+    engine.register_agent(NegativeVerification(RoleEnum.DIAGNOSTIC, messages), replace=True)
     await engine.process_incident(incident.incident_id)
     assert incident.status == IncidentStatus.FAILED
     assert incident.verification["resolved"] is False
@@ -295,7 +288,7 @@ async def test_cancellation_retains_stage_and_never_repeats_uncertain_worker(
                 await release.wait()
 
     role = role_for(stage)
-    engine.agents[role] = CleaningAgent(role, messages)
+    engine.register_agent(CleaningAgent(role, messages), replace=True)
     active = asyncio.create_task(engine.process_incident(incident.incident_id))
     try:
         await asyncio.wait_for(started.wait(), timeout=1)
@@ -309,7 +302,7 @@ async def test_cancellation_retains_stage_and_never_repeats_uncertain_worker(
         assert not retry.done()
         if not cleanup_expires:
             # The queued retry will use a healthy replacement only after cleanup.
-            engine.agents[role] = RecordingAgent(role, messages)
+            engine.register_agent(RecordingAgent(role, messages), replace=True)
             release.set()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(asyncio.shield(active), timeout=1)
@@ -324,9 +317,7 @@ async def test_cancellation_retains_stage_and_never_repeats_uncertain_worker(
             await asyncio.wait_for(retry, timeout=1)
             assert incident.status == IncidentStatus.RESOLVED
             assert [message.stage for message in messages].count(stage) == 2
-            assert [message.stage for message in messages].count(
-                StageEnum.REMEDIATION
-            ) == 1
+            assert [message.stage for message in messages].count(StageEnum.REMEDIATION) == 1
         if cleanup_expires:
             assert not agent_task.done()
             release.set()
@@ -346,7 +337,7 @@ async def test_cancellation_retains_stage_and_never_repeats_uncertain_worker(
 
 @pytest.mark.asyncio
 async def test_default_stubs_complete_a_cycle():
-    engine = Orchestrator()
+    engine = create_stub_orchestrator()
     incident = await engine.create_incident("DB timeout", "Service unavailable")
     await engine.process_incident(incident.incident_id)
     assert incident.status == IncidentStatus.RESOLVED
@@ -364,7 +355,7 @@ async def test_unknown_incident_in_full_cycle_raises():
 @pytest.mark.asyncio
 async def test_missing_agent_fails_without_starting_later_stages():
     engine, incident, messages = await setup_pipeline()
-    del engine.agents[RoleEnum.DIAGNOSTIC]
+    engine.unregister_agent(RoleEnum.DIAGNOSTIC)
     await engine.process_incident(incident.incident_id)
     assert incident.status == IncidentStatus.FAILED
     assert len(incident.history) == 1
@@ -384,9 +375,7 @@ async def test_missing_agent_fails_without_starting_later_stages():
         (StageEnum.VERIFICATION, IncidentStatus.VERIFYING, "Cause", "   "),
     ],
 )
-async def test_inconsistent_state_fails_before_calling_an_agent(
-    stage, status, cause, action
-):
+async def test_inconsistent_state_fails_before_calling_an_agent(stage, status, cause, action):
     engine, incident, messages = await setup_pipeline()
     incident.next_stage = stage
     incident.status = status
@@ -408,16 +397,10 @@ async def test_two_incidents_complete_independently():
     )
     for incident in (first, second):
         assert incident.status == IncidentStatus.RESOLVED
-        own = [
-            message
-            for message in messages
-            if message.incident_id == incident.incident_id
-        ]
+        own = [message for message in messages if message.incident_id == incident.incident_id]
         assert [message.stage for message in own] == STAGES
         assert all(message.payload["title"] == incident.title for message in own)
-        assert all(
-            result.incident_id == incident.incident_id for result in incident.history
-        )
+        assert all(result.incident_id == incident.incident_id for result in incident.history)
 
 
 @pytest.mark.asyncio
@@ -433,9 +416,7 @@ async def test_cancelling_full_cycle_waiter_does_not_affect_active_cycle():
                 await release.wait()
             return await super().process(message)
 
-    engine.agents[RoleEnum.DIAGNOSTIC] = BlockingDiagnostic(
-        RoleEnum.DIAGNOSTIC, messages
-    )
+    engine.register_agent(BlockingDiagnostic(RoleEnum.DIAGNOSTIC, messages), replace=True)
     active = asyncio.create_task(engine.process_incident(incident.incident_id))
     try:
         await asyncio.wait_for(started.wait(), timeout=1)
@@ -492,9 +473,7 @@ async def test_eager_agents_complete_each_stage_once():
     "stage", [StageEnum.DIAGNOSIS, StageEnum.REMEDIATION, StageEnum.VERIFICATION]
 )
 @pytest.mark.parametrize("outcome", ["result", "error"])
-async def test_late_stage_completion_cannot_commit_after_cleanup_timeout(
-    stage, outcome
-):
+async def test_late_stage_completion_cannot_commit_after_cleanup_timeout(stage, outcome):
     engine, incident, messages = await setup_pipeline()
     await advance_to(engine, incident, stage)
     previous = incident.model_dump()
@@ -516,7 +495,7 @@ async def test_late_stage_completion_cannot_commit_after_cleanup_timeout(
                     raise RuntimeError("Late cleanup failure") from None
                 return await super().process(message)
 
-    engine.agents[role_for(stage)] = LateAgent(role_for(stage), messages)
+    engine.register_agent(LateAgent(role_for(stage), messages), replace=True)
     active = asyncio.create_task(engine.process_incident(incident.incident_id))
     try:
         await asyncio.wait_for(started.wait(), timeout=1)

@@ -1,34 +1,71 @@
 import asyncio
+import logging
+from collections.abc import Mapping
+from inspect import iscoroutinefunction
 from math import isfinite
+from types import MappingProxyType
 from uuid import UUID
 
-from agents.base import BaseSlaveAgent
-from agents.diagnostic import DiagnosticAgent
-from agents.worker import WorkerAgent
 from core.incidents.models import Incident, IncidentStatus
+from shared.contracts.agents import Agent, validate_agent_result
 from shared.contracts.messages import AgentMessage, AgentResult, RoleEnum, StageEnum
 from shared.contracts.workflow import DiagnosisData, RemediationData, VerificationData
 from shared.time import utc_now
+
+logger = logging.getLogger(__name__)
 
 
 class Orchestrator:
     """Coordinates processing steps for incidents."""
 
-    def __init__(self, agent_timeout: float = 10.0, *, cleanup_timeout: float = 10.0):
+    def __init__(
+        self,
+        agent_timeout: float = 10.0,
+        *,
+        cleanup_timeout: float = 10.0,
+        agents: Mapping[RoleEnum, Agent] | None = None,
+    ):
         self.storage: dict[UUID, Incident] = {}
         self.agent_timeout = agent_timeout
         self.cleanup_timeout = cleanup_timeout
 
-        self.agents: dict[RoleEnum, BaseSlaveAgent] = {
-            RoleEnum.TRIAGE: BaseSlaveAgent(RoleEnum.TRIAGE),
-            RoleEnum.DIAGNOSTIC: DiagnosticAgent(),
-            RoleEnum.REMEDIATION: WorkerAgent(),
-        }
+        self._agents: dict[RoleEnum, Agent] = {}
+        if agents is not None:
+            for role, agent in agents.items():
+                self._validate_agent(role, agent)
+                self._agents[role] = agent
 
         # Prevent concurrent processing of the same incident.
         self._locks: dict[UUID, asyncio.Lock] = {}
         # Keep unfinished agents alive and prevent overlap after a cleanup timeout.
         self._active_agents: dict[UUID, asyncio.Task[AgentResult]] = {}
+
+    @property
+    def agents(self) -> Mapping[RoleEnum, Agent]:
+        """Registered agents; modifications go through the validated registration API."""
+        return MappingProxyType(self._agents)
+
+    @staticmethod
+    def _validate_agent(role: RoleEnum, agent: Agent) -> None:
+        if not isinstance(role, RoleEnum) or role == RoleEnum.ORCHESTRATOR:
+            raise ValueError("Agent role must be TRIAGE, DIAGNOSTIC or REMEDIATION")
+        agent_role = getattr(agent, "role", None)
+        if not isinstance(agent_role, RoleEnum) or agent_role != role:
+            raise ValueError("Agent role does not match its registration")
+        if not iscoroutinefunction(getattr(agent, "process", None)):
+            raise TypeError("Agent must implement async process(AgentMessage) -> AgentResult")
+
+    def register_agent(self, agent: Agent, *, replace: bool = False) -> None:
+        """Register a structural implementation; replacing a role must be explicit."""
+        role = getattr(agent, "role", None)
+        self._validate_agent(role, agent)
+        if role in self._agents and not replace:
+            raise ValueError(f"Agent already registered for {role.value}")
+        self._agents[role] = agent
+
+    def unregister_agent(self, role: RoleEnum) -> Agent:
+        """Remove future routing; an already running task still belongs to its agent."""
+        return self._agents.pop(role)
 
     @property
     def agent_timeout(self) -> float:
@@ -99,7 +136,10 @@ class Orchestrator:
             if stage == StageEnum.TRIAGE:
                 incident.update_status(IncidentStatus.INVESTIGATING)
             incident.last_error = None
-            agent = self.agents[message.receiver]
+            agent = self._agents.get(message.receiver)
+            if agent is None:
+                raise ValueError(f"No agent registered for {message.receiver.value}")
+            self._validate_agent(message.receiver, agent)
             loop = asyncio.get_running_loop()
             execution_deadline = loop.time() + self.agent_timeout
             deadline = asyncio.timeout_at(execution_deadline)
@@ -107,9 +147,7 @@ class Orchestrator:
                 # Eager task factories may execute the agent during creation.
                 agent_task = asyncio.create_task(agent.process(message))
                 self._active_agents[incident_id] = agent_task
-                agent_task.add_done_callback(
-                    lambda task: self._agent_finished(incident_id, task)
-                )
+                agent_task.add_done_callback(lambda task: self._agent_finished(incident_id, task))
                 # Caller/deadline cancellation interrupts only this wait.
                 # The agent is cancelled once, outside the execution timer.
                 await asyncio.wait({agent_task})
@@ -121,20 +159,16 @@ class Orchestrator:
                 # Never accept a result after the execution deadline expired.
                 raise TimeoutError("Agent processing timed out")
 
-            result = self._validate_result(message, result)
+            result = validate_agent_result(message, result)
             self._handle_agent_result(incident, result)
             return incident.status != IncidentStatus.FAILED
 
         except asyncio.CancelledError:
             completed = await self._stop_agent(agent_task)
             retryable = completed and stage != StageEnum.REMEDIATION
-            incident.update_status(
-                previous_status if retryable else IncidentStatus.FAILED
-            )
+            incident.update_status(previous_status if retryable else IncidentStatus.FAILED)
             incident.last_error = (
-                None
-                if retryable
-                else "Agent cancellation left cleanup or remediation unconfirmed"
+                None if retryable else "Agent cancellation left cleanup or remediation unconfirmed"
             )
             raise
 
@@ -150,7 +184,7 @@ class Orchestrator:
             if caller_was_cancelled():
                 # Cancellation received during cleanup must also propagate.
                 raise asyncio.CancelledError from exc
-            print(f"[Orchestrator] Ошибка обработки {incident_id}: {exc}")
+            logger.error("Incident %s failed: %s", incident_id, incident.last_error)
             return False
 
     @staticmethod
@@ -186,9 +220,7 @@ class Orchestrator:
             StageEnum.REMEDIATION,
             StageEnum.VERIFICATION,
         ) and not (incident.root_cause and incident.root_cause.strip()):
-            raise ValueError(
-                "A diagnosis is required before remediation or verification"
-            )
+            raise ValueError("A diagnosis is required before remediation or verification")
         if incident.next_stage == StageEnum.VERIFICATION and not (
             incident.action_taken and incident.action_taken.strip()
         ):
@@ -240,9 +272,7 @@ class Orchestrator:
         # An exception during teardown leaves resource release unconfirmed.
         return task.cancelled() or task.exception() is None
 
-    def _agent_finished(
-        self, incident_id: UUID, task: asyncio.Task[AgentResult]
-    ) -> None:
+    def _agent_finished(self, incident_id: UUID, task: asyncio.Task[AgentResult]) -> None:
         if self._active_agents.get(incident_id) is task:
             del self._active_agents[incident_id]
         if not task.cancelled():
@@ -250,38 +280,10 @@ class Orchestrator:
             task.exception()
 
     @staticmethod
-    def _validate_result(message: AgentMessage, result: AgentResult) -> AgentResult:
-        if not isinstance(result, AgentResult):
-            raise TypeError("Agent result must be an AgentResult")
-
-        # Revalidate a detached copy: model_copy(update=...) and model_construct
-        # can bypass Pydantic field validation even on an otherwise frozen model.
-        result = AgentResult.model_validate(result.model_dump())
-
-        if result.message_id != message.message_id:
-            raise ValueError("Agent result message_id mismatch")
-
-        if result.incident_id != message.incident_id:
-            raise ValueError("Agent result incident_id mismatch")
-
-        if result.sender != message.receiver:
-            raise ValueError("Unexpected agent role in result")
-
-        if result.receiver != RoleEnum.ORCHESTRATOR:
-            raise ValueError("Unexpected result receiver")
-
-        if result.stage != message.stage:
-            raise ValueError("Agent result stage mismatch")
-
-        return result
-
-    @staticmethod
     def _handle_agent_result(incident: Incident, result: AgentResult) -> None:
         if not result.is_success:
             incident.history.append(result)
-            incident.last_error = (
-                result.error_message or "Agent reported a failed result"
-            )
+            incident.last_error = result.error_message or "Agent reported a failed result"
             incident.update_status(IncidentStatus.FAILED)
             return
 
@@ -314,24 +316,3 @@ class Orchestrator:
                 incident.last_error = data.details
         incident.history.append(result)
         incident.updated_at = utc_now()
-
-
-async def main() -> None:
-    orchestrator = Orchestrator(agent_timeout=5.0)
-
-    incident = await orchestrator.create_incident(
-        title="Alert: DB_TIMEOUT",
-        description=("Production database is dropping connections with timeout 5000ms"),
-    )
-
-    print(f"Created: {incident.status.value}")
-    await orchestrator.process_incident(incident.incident_id)
-
-    updated = orchestrator.storage[incident.incident_id]
-    print(f"Status: {updated.status.value}")
-    print(f"Metrics: {updated.metrics_log}")
-    print(f"History entries: {len(updated.history)}")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

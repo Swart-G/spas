@@ -58,7 +58,7 @@ class ResourceAgent(BaseSlaveAgent):
 async def make_incident(agent_timeout=1, cleanup_timeout=1):
     orchestrator = Orchestrator(agent_timeout=agent_timeout, cleanup_timeout=cleanup_timeout)
     agent = ResourceAgent()
-    orchestrator.agents[RoleEnum.TRIAGE] = agent
+    orchestrator.register_agent(agent, replace=True)
     incident = await orchestrator.create_incident("Timeout", "Resource lifecycle")
     return orchestrator, agent, incident
 
@@ -256,7 +256,7 @@ async def test_already_cancelled_agent_cleanup_is_not_cancelled_again():
             return await super().process(message)
 
     agent = SelfCancellingAgent()
-    orchestrator.agents[RoleEnum.TRIAGE] = agent
+    orchestrator.register_agent(agent, replace=True)
     incident = await orchestrator.create_incident("Timeout", "Self cancellation")
     active = asyncio.create_task(orchestrator.execute_next_step(incident.incident_id))
     try:
@@ -302,7 +302,7 @@ async def test_late_completion_after_cleanup_timeout_never_commits_a_result(outc
                 )
 
     agent = LateAgent(RoleEnum.TRIAGE)
-    orchestrator.agents[RoleEnum.TRIAGE] = agent
+    orchestrator.register_agent(agent, replace=True)
     incident = await orchestrator.create_incident("Timeout", "Late result")
     active = asyncio.create_task(orchestrator.execute_next_step(incident.incident_id))
     try:
@@ -321,7 +321,9 @@ async def test_late_completion_after_cleanup_timeout_never_commits_a_result(outc
         assert incident.metrics_log == {}
     finally:
         release.set()
-        await asyncio.wait_for(asyncio.gather(active, agent.task, return_exceptions=True), timeout=1)
+        await asyncio.wait_for(
+            asyncio.gather(active, agent.task, return_exceptions=True), timeout=1
+        )
 
 
 @pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), float("-inf")])
@@ -346,7 +348,7 @@ async def test_cleanup_failure_blocks_retry_even_when_agent_task_has_finished():
             raise RuntimeError("Resource release failed")
 
     agent = FailingCleanupAgent()
-    orchestrator.agents[RoleEnum.TRIAGE] = agent
+    orchestrator.register_agent(agent, replace=True)
     incident = await orchestrator.create_incident("Failure", "Cleanup failure")
     active = asyncio.create_task(orchestrator.execute_next_step(incident.incident_id))
     try:
@@ -378,7 +380,7 @@ async def test_late_cleanup_confirmation_blocks_retry_after_event_loop_delay():
             self.closed.set()
 
     agent = BlockingCleanupAgent()
-    orchestrator.agents[RoleEnum.TRIAGE] = agent
+    orchestrator.register_agent(agent, replace=True)
     incident = await orchestrator.create_incident("Delay", "Blocking resource close")
     active = asyncio.create_task(orchestrator.execute_next_step(incident.incident_id))
     try:
@@ -434,7 +436,7 @@ async def test_execution_deadline_includes_eager_start_and_rejects_blocking_late
 
     try:
         orchestrator = Orchestrator(agent_timeout=0.005)
-        orchestrator.agents[RoleEnum.TRIAGE] = BlockingAgent(RoleEnum.TRIAGE)
+        orchestrator.register_agent(BlockingAgent(RoleEnum.TRIAGE), replace=True)
         incident = await orchestrator.create_incident("Delay", "Blocking agent execution")
         await orchestrator.execute_next_step(incident.incident_id)
 
@@ -495,7 +497,7 @@ async def test_unawaited_late_cleanup_error_is_observed_and_agent_task_is_releas
                 raise RuntimeError("Late resource-close failure") from None
 
     agent = LateFailureAgent(RoleEnum.TRIAGE)
-    orchestrator.agents[RoleEnum.TRIAGE] = agent
+    orchestrator.register_agent(agent, replace=True)
     incident = await orchestrator.create_incident("Late failure", "Exception observation")
     active = asyncio.create_task(orchestrator.execute_next_step(incident.incident_id))
     try:

@@ -96,7 +96,8 @@ Resolved / Replan / Re-diagnosis
 ## Текущая реализация и запуск
 
 Ядро выполняет полный цикл `Triage → Diagnostic → Worker → Diagnostic (проверка)`
-на заглушках. Внешние LLM, MCP и инструменты пока не подключены. Инцидент получает
+через общий интерфейс `shared.contracts.Agent`. Реализации подключаются извне;
+ядро не импортирует конкретных агентов. Инцидент получает
 `RESOLVED` только после положительного ответа отдельной проверки; ошибка
 или отрицательный результат дают `FAILED` без повторного исправления.
 Описание API и поведения отмены: [ORCHESTRATOR](core/orchestrator/ORCHESTRATOR.md).
@@ -104,6 +105,30 @@ Resolved / Replan / Re-diagnosis
 Из корня репозитория, Python 3.12+ и uv:
 
 ```bash
-uv run --locked --extra dev --extra colab python -m core.orchestrator.engine
+uv run --locked --extra dev --extra colab python -m apps.cli.run_incident --stub
 uv run --locked --extra dev --extra colab python -m pytest -q
 ```
+
+Прогон с агентными HTTP-сервисами и изменением состояния локального тестового ресурса:
+
+```bash
+uv run --locked --extra dev --extra colab python -m apps.cli.demo_agents
+uv run --locked --extra dev --extra colab python -m apps.cli.demo_agents --repair-fails
+```
+
+Вторая команда намеренно получает отрицательную проверку и завершается с кодом `1`.
+Стенд запускает сервер на свободном порту `127.0.0.1` и останавливает его после прогона.
+Это функциональные демонстрационные агенты, без доступа к LLM или реальной инфраструктуре.
+
+Собственная фабрика подключений (`module:function`, возвращает словарь ролей и агентов):
+
+```bash
+uv run --locked --extra dev --extra colab python -m apps.cli.run_incident \
+  --agent-factory my_application:build_agents
+```
+
+Фабрика — доверенный Python-код приложения; допускается `async def`.
+См. [интерфейс агентов](shared/contracts/CONTRACTS.md) и [описание CLI](apps/cli/CLI.md).
+
+Wheel включает `shared`, `core`, `agents`, `apps` и `llm`: эти импорты и команды
+`python -m apps.cli...` доступны после установки пакета вне репозитория.

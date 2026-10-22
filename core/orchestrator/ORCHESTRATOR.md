@@ -1,8 +1,10 @@
 # ORCHESTRATOR
 
-Координирует обработку инцидента. Требуется Python 3.11+.
-Все агенты по умолчанию — детерминированные заглушки: они не обращаются к LLM,
-MCP и инфраструктуре и не выполняют реальных исправлений или проверок.
+Координирует обработку инцидента. Для установки проекта требуется Python 3.12+.
+Ядро не создаёт и не импортирует конкретных агентов. Без параметра `agents`
+реестр пуст: отсутствующее подключение приводит к `FAILED`, подмены заглушкой нет.
+`apps.agent_setup` собирает заглушки отдельно; `apps.cli.demo_agents` запускает
+функциональные HTTP-агенты с управляемым локальным ресурсом.
 
 ## Цикл обработки
 
@@ -23,11 +25,25 @@ MCP и инфраструктуре и не выполняют реальных 
 `output_data={"resolved": False, "details": "..."}`.
 
 ```python
-orchestrator = Orchestrator(agent_timeout=5, cleanup_timeout=15)
+from apps.agent_setup import stub_agents
+from core.incidents.models import IncidentStatus
+from core.orchestrator.engine import Orchestrator
+
+orchestrator = Orchestrator(agents=stub_agents(), agent_timeout=5, cleanup_timeout=15)
 incident = await orchestrator.create_incident("DB_TIMEOUT", "Connections exhausted")
 incident = await orchestrator.process_incident(incident.incident_id)
-assert incident.status == IncidentStatus.RESOLVED  # С заглушками по умолчанию.
+assert incident.status == IncidentStatus.RESOLVED  # С явно подключёнными заглушками.
 ```
+
+Подключение реализует `shared.contracts.Agent`: свойство `role: RoleEnum` и
+`async process(AgentMessage) -> AgentResult`. Наследование не требуется.
+Конструктор копирует переданный словарь `agents`. Для изменения подключений
+используются `register_agent(agent)`, `register_agent(agent, replace=True)` и
+`unregister_agent(role)`; `orchestrator.agents` — представление только для чтения.
+Повторная регистрация роли без `replace=True`, несовпадение роли и синхронный
+`process` отклоняются. Уже запущенная задача остаётся под наблюдением своего
+агента при замене/удалении регистрации. У нового подключения нет права обходить
+блокировку или повторять успешно принятый этап.
 
 `execute_next_step(id)` выполняет один текущий этап. Следующий вызов продвигает
 инцидент дальше, не повторяя успешный этап. `process_incident(id)` выполняет
@@ -77,6 +93,11 @@ JSON-представления ранее принятых результато
 автоматический повтор опасен даже после нормального завершения очистки.
 `CancelledError` передаётся вызывающему коду. Таймаут выполнения всегда даёт
 `FAILED`, в том числе при отмене вызывающего кода во время последующей очистки.
+
+Для удалённого вызова закрытие HTTP-соединения не подтверждает завершение агента.
+`HttpAgent` в этом случае поднимает `AgentCompletionUnknownError`; инцидент
+остаётся `FAILED` даже после отмены читающего этапа. Автоматический повтор
+разрешён только когда реализация может подтвердить завершение очистки.
 
 Ошибка очистки или превышение её срока также даёт `FAILED`. Незавершённая задача
 остаётся под наблюдением и блокирует новый запуск даже при прямой перезаписи

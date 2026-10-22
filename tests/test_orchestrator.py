@@ -1,4 +1,3 @@
-
 import asyncio
 from types import SimpleNamespace
 from uuid import uuid4
@@ -7,8 +6,8 @@ import pytest
 import pytest_asyncio
 
 from agents.base import BaseSlaveAgent
+from apps.agent_setup import create_stub_orchestrator
 from core.incidents.models import IncidentStatus
-from core.orchestrator.engine import Orchestrator
 from shared.contracts.messages import AgentResult, RoleEnum
 
 
@@ -68,7 +67,7 @@ class InvalidCorrelationAgent(BaseSlaveAgent):
 
 @pytest.fixture
 def orchestrator():
-    return Orchestrator(agent_timeout=0.05)
+    return create_stub_orchestrator(agent_timeout=0.05)
 
 
 @pytest_asyncio.fixture
@@ -80,11 +79,9 @@ async def incident(orchestrator):
 
 
 @pytest.mark.asyncio
-async def test_successful_triage_updates_metrics(
-    orchestrator, incident
-):
+async def test_successful_triage_updates_metrics(orchestrator, incident):
     agent = SuccessfulAgent()
-    orchestrator.agents[RoleEnum.TRIAGE] = agent
+    orchestrator.register_agent(agent, replace=True)
 
     await orchestrator.execute_next_step(incident.incident_id)
 
@@ -99,12 +96,8 @@ async def test_successful_triage_updates_metrics(
 
 
 @pytest.mark.asyncio
-async def test_failed_result_marks_incident_failed(
-    orchestrator, incident
-):
-    orchestrator.agents[RoleEnum.TRIAGE] = FailedAgent(
-        RoleEnum.TRIAGE
-    )
+async def test_failed_result_marks_incident_failed(orchestrator, incident):
+    orchestrator.register_agent(FailedAgent(RoleEnum.TRIAGE), replace=True)
 
     await orchestrator.execute_next_step(incident.incident_id)
 
@@ -113,18 +106,12 @@ async def test_failed_result_marks_incident_failed(
     assert updated.status == IncidentStatus.FAILED
     assert len(updated.history) == 1
     assert updated.history[0].is_success is False
-    assert updated.history[0].error_message == (
-        "Diagnostic service unavailable"
-    )
+    assert updated.history[0].error_message == ("Diagnostic service unavailable")
 
 
 @pytest.mark.asyncio
-async def test_agent_exception_marks_incident_failed(
-    orchestrator, incident
-):
-    orchestrator.agents[RoleEnum.TRIAGE] = CrashingAgent(
-        RoleEnum.TRIAGE
-    )
+async def test_agent_exception_marks_incident_failed(orchestrator, incident):
+    orchestrator.register_agent(CrashingAgent(RoleEnum.TRIAGE), replace=True)
 
     await orchestrator.execute_next_step(incident.incident_id)
 
@@ -136,12 +123,8 @@ async def test_agent_exception_marks_incident_failed(
 
 
 @pytest.mark.asyncio
-async def test_agent_timeout_marks_incident_failed(
-    orchestrator, incident
-):
-    orchestrator.agents[RoleEnum.TRIAGE] = HangingAgent(
-        RoleEnum.TRIAGE
-    )
+async def test_agent_timeout_marks_incident_failed(orchestrator, incident):
+    orchestrator.register_agent(HangingAgent(RoleEnum.TRIAGE), replace=True)
 
     await orchestrator.execute_next_step(incident.incident_id)
 
@@ -152,12 +135,8 @@ async def test_agent_timeout_marks_incident_failed(
 
 
 @pytest.mark.asyncio
-async def test_invalid_correlation_marks_incident_failed(
-    orchestrator, incident
-):
-    orchestrator.agents[RoleEnum.TRIAGE] = (
-        InvalidCorrelationAgent(RoleEnum.TRIAGE)
-    )
+async def test_invalid_correlation_marks_incident_failed(orchestrator, incident):
+    orchestrator.register_agent(InvalidCorrelationAgent(RoleEnum.TRIAGE), replace=True)
 
     await orchestrator.execute_next_step(incident.incident_id)
 
@@ -178,7 +157,7 @@ async def test_next_execution_advances_to_diagnosis_without_repeating_triage(
     orchestrator, incident
 ):
     agent = SuccessfulAgent()
-    orchestrator.agents[RoleEnum.TRIAGE] = agent
+    orchestrator.register_agent(agent, replace=True)
 
     await orchestrator.execute_next_step(incident.incident_id)
     await orchestrator.execute_next_step(incident.incident_id)
@@ -190,16 +169,14 @@ async def test_next_execution_advances_to_diagnosis_without_repeating_triage(
 
 
 @pytest.mark.asyncio
-async def test_concurrent_steps_advance_without_repeating_triage(
-    orchestrator, incident
-):
+async def test_concurrent_steps_advance_without_repeating_triage(orchestrator, incident):
     class SlowAgent(SuccessfulAgent):
         async def process(self, message):
             await asyncio.sleep(0.02)
             return await super().process(message)
 
     agent = SlowAgent()
-    orchestrator.agents[RoleEnum.TRIAGE] = agent
+    orchestrator.register_agent(agent, replace=True)
 
     await asyncio.gather(
         orchestrator.execute_next_step(incident.incident_id),
@@ -225,7 +202,7 @@ async def test_cancelled_agent_allows_incident_retry(orchestrator, incident):
             finally:
                 cancelled.set()
 
-    orchestrator.agents[RoleEnum.TRIAGE] = CancellableAgent(RoleEnum.TRIAGE)
+    orchestrator.register_agent(CancellableAgent(RoleEnum.TRIAGE), replace=True)
     task = asyncio.create_task(orchestrator.execute_next_step(incident.incident_id))
     await asyncio.wait_for(started.wait(), timeout=1)
     assert incident.status == IncidentStatus.INVESTIGATING
@@ -242,7 +219,7 @@ async def test_cancelled_agent_allows_incident_retry(orchestrator, incident):
     assert incident.metrics_log == {}
 
     agent = SuccessfulAgent()
-    orchestrator.agents[RoleEnum.TRIAGE] = agent
+    orchestrator.register_agent(agent, replace=True)
     await orchestrator.execute_next_step(incident.incident_id)
 
     assert agent.calls == 1
@@ -263,7 +240,7 @@ async def test_cancelled_waiter_does_not_reset_running_incident(orchestrator, in
 
     orchestrator.agent_timeout = 1
     agent = BlockingAgent()
-    orchestrator.agents[RoleEnum.TRIAGE] = agent
+    orchestrator.register_agent(agent, replace=True)
     active = asyncio.create_task(orchestrator.execute_next_step(incident.incident_id))
     try:
         await asyncio.wait_for(started.wait(), timeout=1)
@@ -299,7 +276,7 @@ async def test_agent_retained_data_cannot_change_history_or_metrics(orchestrator
             return self.result
 
     agent = RetainingAgent(RoleEnum.TRIAGE)
-    orchestrator.agents[RoleEnum.TRIAGE] = agent
+    orchestrator.register_agent(agent, replace=True)
     await orchestrator.execute_next_step(incident.incident_id)
     source["detected_metrics"]["latencies"][1]["p99"] = 999
 
@@ -337,7 +314,7 @@ async def test_waiting_execution_retries_after_active_execution_is_cancelled(
             return await super().process(message)
 
     agent = RetryAgent()
-    orchestrator.agents[RoleEnum.TRIAGE] = agent
+    orchestrator.register_agent(agent, replace=True)
     active = asyncio.create_task(orchestrator.execute_next_step(incident.incident_id))
     await asyncio.wait_for(started.wait(), timeout=1)
     waiter = asyncio.create_task(orchestrator.execute_next_step(incident.incident_id))
@@ -371,7 +348,7 @@ async def test_agent_cannot_swallow_caller_cancellation(orchestrator, incident, 
                     asyncio.current_task().uncancel()
                 return await super().process(message)
 
-    orchestrator.agents[RoleEnum.TRIAGE] = SuppressingAgent()
+    orchestrator.register_agent(SuppressingAgent(), replace=True)
     task = asyncio.create_task(orchestrator.execute_next_step(incident.incident_id))
     await asyncio.wait_for(started.wait(), timeout=1)
     task.cancel()
@@ -385,7 +362,7 @@ async def test_agent_cannot_swallow_caller_cancellation(orchestrator, incident, 
     assert incident.history == []
     assert incident.metrics_log == {}
     agent = SuccessfulAgent()
-    orchestrator.agents[RoleEnum.TRIAGE] = agent
+    orchestrator.register_agent(agent, replace=True)
     await orchestrator.execute_next_step(incident.incident_id)
     assert agent.calls == (0 if outcome == "error" else 1)
 
@@ -417,7 +394,7 @@ async def test_cancellation_waits_for_agent_cleanup_before_retry(orchestrator, i
             return await super().process(message)
 
     agent = CleaningAgent()
-    orchestrator.agents[RoleEnum.TRIAGE] = agent
+    orchestrator.register_agent(agent, replace=True)
     active = asyncio.create_task(orchestrator.execute_next_step(incident.incident_id))
     await asyncio.wait_for(started.wait(), timeout=1)
     active.cancel()
@@ -443,7 +420,7 @@ async def test_cancellation_waits_for_agent_cleanup_before_retry(orchestrator, i
 @pytest.mark.asyncio
 async def test_preexisting_cancellation_count_does_not_cancel_new_step(orchestrator, incident):
     agent = SuccessfulAgent()
-    orchestrator.agents[RoleEnum.TRIAGE] = agent
+    orchestrator.register_agent(agent, replace=True)
 
     async def run_after_caught_cancellation():
         task = asyncio.current_task()
@@ -474,7 +451,7 @@ async def test_result_snapshot_is_validated_at_agent_boundary(orchestrator, inci
             return self.result
 
     agent = UpdatingAgent()
-    orchestrator.agents[RoleEnum.TRIAGE] = agent
+    orchestrator.register_agent(agent, replace=True)
     await orchestrator.execute_next_step(incident.incident_id)
     source["nested"]["values"].append(999)
 
@@ -492,7 +469,7 @@ async def test_structurally_similar_object_is_not_an_agent_result(orchestrator, 
             result = await super().process(message)
             return SimpleNamespace(**result.model_dump())
 
-    orchestrator.agents[RoleEnum.TRIAGE] = UntypedAgent()
+    orchestrator.register_agent(UntypedAgent(), replace=True)
     await orchestrator.execute_next_step(incident.incident_id)
 
     assert incident.status == IncidentStatus.FAILED
@@ -514,7 +491,7 @@ async def test_suppressed_timeout_does_not_commit_agent_result(orchestrator, inc
                     asyncio.current_task().uncancel()
                 return await super().process(message)
 
-    orchestrator.agents[RoleEnum.TRIAGE] = SuppressingAgent()
+    orchestrator.register_agent(SuppressingAgent(), replace=True)
     await asyncio.wait_for(orchestrator.execute_next_step(incident.incident_id), timeout=1)
 
     assert incident.status == IncidentStatus.FAILED

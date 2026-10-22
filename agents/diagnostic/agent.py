@@ -1,14 +1,14 @@
 """Deterministic diagnostic stub; no infrastructure calls are performed."""
 
-from agents.base import BaseSlaveAgent
 from shared.contracts.messages import AgentMessage, AgentResult, RoleEnum, StageEnum
 
 
-class DiagnosticAgent(BaseSlaveAgent):
-    def __init__(self):
-        super().__init__(RoleEnum.DIAGNOSTIC)
+class DiagnosticAgent:
+    role = RoleEnum.DIAGNOSTIC
 
     async def process(self, message: AgentMessage) -> AgentResult:
+        if message.receiver != self.role:
+            raise ValueError("Diagnostic received a message for another role")
         if message.stage == StageEnum.DIAGNOSIS:
             data = {"root_cause": "Mock diagnosis: exhausted database connection pool"}
         elif message.stage == StageEnum.VERIFICATION:
