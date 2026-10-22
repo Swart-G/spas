@@ -179,35 +179,17 @@ class LLMGateway:
     async def classify_command(
         self, request: CommandAnalysisRequest, rules: RuleDecision
     ) -> CommandModelVerdict:
+        if self.settings.command_api == "decisions":
+            from safety_analyzer.decision_adapter import decision_payload, parse_decision
+
+            payload = decision_payload(self.settings.model, request, rules, COMMAND_POLICY)
+            return parse_decision(await self._exchange(payload, "decisions"), payload)
         content = await self._generate(self.command_payload(request, rules))
         return parse_command_output(content, self.settings.command_output_mode)
 
     async def _generate(self, payload: dict[str, Any]) -> str:
-        if not self.settings.configured:
-            raise GatewayError("not_configured")
-        headers = {}
-        if self.settings.gateway_api_key:
-            headers["Authorization"] = "Bearer " + self.settings.gateway_api_key.get_secret_value()
+        envelope = await self._exchange(payload, "chat/completions")
         try:
-            # Explicit wall-clock limit is enforced by Analyzer in addition to HTTP phase limits.
-            async with self.client.stream(
-                "POST",
-                self.settings.gateway_base_url + "chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=self.settings.timeout_seconds,
-                follow_redirects=False,
-            ) as response:
-                if response.status_code != 200:
-                    raise GatewayError("gateway_unavailable")
-                data = bytearray()
-                async for chunk in response.aiter_bytes():
-                    data.extend(chunk)
-                    if len(data) > 32768:
-                        raise GatewayError("invalid_model_output")
-            envelope = strict_json(data.decode("utf-8"))
-            if not isinstance(envelope, dict) or envelope.get("error"):
-                raise ValueError("invalid gateway envelope")
             choices = envelope["choices"]
             if not isinstance(choices, list) or len(choices) != 1:
                 raise ValueError("exactly one choice is required")
@@ -224,6 +206,36 @@ class LLMGateway:
             ):
                 raise ValueError("incomplete or non-text generation")
             return message["content"]
+        except (KeyError, ValueError, TypeError, RecursionError) as exc:
+            raise GatewayError("invalid_model_output") from exc
+
+    async def _exchange(self, payload: dict[str, Any], endpoint: str) -> dict:
+        if not self.settings.configured:
+            raise GatewayError("not_configured")
+        headers = {}
+        if self.settings.gateway_api_key:
+            headers["Authorization"] = "Bearer " + self.settings.gateway_api_key.get_secret_value()
+        try:
+            # Explicit wall-clock limit is enforced by Analyzer in addition to HTTP phase limits.
+            async with self.client.stream(
+                "POST",
+                self.settings.gateway_base_url + endpoint,
+                headers=headers,
+                json=payload,
+                timeout=self.settings.timeout_seconds,
+                follow_redirects=False,
+            ) as response:
+                if response.status_code != 200:
+                    raise GatewayError("gateway_unavailable")
+                data = bytearray()
+                async for chunk in response.aiter_bytes():
+                    data.extend(chunk)
+                    if len(data) > 32768:
+                        raise GatewayError("invalid_model_output")
+            envelope = strict_json(data.decode("utf-8"))
+            if not isinstance(envelope, dict) or envelope.get("error"):
+                raise ValueError("invalid gateway envelope")
+            return envelope
         except httpx.TimeoutException as exc:
             raise GatewayError("gateway_timeout") from exc
         except httpx.HTTPError as exc:

@@ -6,8 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from safety_analyzer.command_evaluation import command_gate, evaluate_commands, load_cases
-from safety_analyzer.commands import CommandAnalyzer, configured_rules
+from safety_analyzer.command_evaluation import build_parser, run
 from safety_analyzer.config import Settings
 from safety_analyzer.evaluation import evaluate, load_dataset, release_gate
 from safety_analyzer.gateway import LLMGateway
@@ -18,11 +17,13 @@ pytestmark = [
     pytest.mark.skipif(os.getenv("SAFETY_RUN_LIVE") != "1", reason="real model not opted in"),
 ]
 DATASET = Path(__file__).resolve().parents[1] / "datasets" / "safety-v1.jsonl"
-COMMAND_DATASET = DATASET.with_name("commands-v1.jsonl")
+COMMAND_DATASET = DATASET.with_name("quality-v1.jsonl")
 
 
 async def test_real_model_false_allow_and_stability():
     settings = Settings()
+    if settings.command_api == "decisions":
+        pytest.skip("Native Choice models use the command evaluation, not content Chat Completions")
     assert settings.configured, "configure the real Gateway before running live tests"
     assert settings.model != "stub", "a stub is not a model quality evaluation"
     cases = load_dataset(DATASET)
@@ -37,12 +38,18 @@ async def test_real_model_false_allow_and_stability():
 async def test_real_command_model_false_allow_and_stability():
     settings = Settings()
     assert settings.configured and settings.model != "stub"
-    # Live deployment must deliberately configure scopes matching the test policy.
-    cases = load_cases(COMMAND_DATASET)
-    async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
-        report = await evaluate_commands(
-            CommandAnalyzer(LLMGateway(settings, client), configured_rules(settings)), cases, 3
-        )
-    assert report["rule_bypass_runs"] == 0
-    assert report["model_false_allow_runs"] == 0
-    assert command_gate(report)
+    # Deployment scopes must deliberately match the dataset policy. Persist both artifacts.
+    args = build_parser().parse_args(
+        [
+            "--dataset",
+            str(COMMAND_DATASET),
+            "--repeats",
+            "5",
+            "--seed",
+            "42",
+            "--output",
+            str(DATASET.parents[1] / "reports/live-command-evaluation.json"),
+        ]
+    )
+    args.backend_revision = os.getenv("SAFETY_BACKEND_REVISION")
+    assert await run(args) == 0, "See reports/live-command-evaluation.json and .md for failed gates"

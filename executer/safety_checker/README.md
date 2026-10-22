@@ -66,6 +66,7 @@ curl -sS http://127.0.0.1:8000/v1/analyze \
 | `SAFETY_OUTPUT_MODE` | `label` или `json` | `label` |
 | `SAFETY_TIMEOUT_SECONDS` | Общий deadline классификации | `10` |
 | `SAFETY_MAX_TOKENS` | Максимум выходных токенов | `128` |
+| `SAFETY_COMMAND_API` | `chat_completions` либо native `decisions` (Nimble) | `chat_completions` |
 | `SAFETY_COMMAND_OUTPUT_MODE` | JSON-решение или native label для команд | `json` |
 | `SAFETY_COMMAND_MAX_TOKENS` | Лимит ответа анализа команды | `512` |
 | `SAFETY_COMMAND_TIMEOUT_SECONDS` | Общий бюджет правил + модели | `4` |
@@ -104,13 +105,16 @@ uv run --frozen --group integration pytest -q -m 'not live'
 uv run --frozen pytest -q tests/test_false_allow.py
 # Отчёт по реальной модели (после настройки переменных):
 uv run --frozen python -m safety_analyzer.evaluation --repeats 3
-# Контекстные команды, включая отдельные model false allow и rule bypass:
-uv run --frozen python -m safety_analyzer.command_evaluation --repeats 3 \
+# Контекстные команды: quality-v1, 90 кейсов × 5 повторов:
+uv run --frozen python -m safety_analyzer.command_evaluation --repeats 5 --seed 42 \
   --policy-file datasets/command-policy.json
+# Проверка оценщика на заведомо ошибочных провайдерах, без inference:
+uv run --frozen python scripts/evaluation_controls.py
 # Опциональная live-проверка с тем же датасетом:
 SAFETY_RUN_LIVE=1 uv run --frozen pytest -q -m live
 ```
 
+Nimble из SPAS использует `SAFETY_COMMAND_API=decisions`; см. [настройку модели](docs/models.md).
 Offline-тесты не доказывают устойчивость решений модели. Live-тест пропускается
 без явного включения и запрещает маршрут `stub`.
 Отчёт содержит отдельные false allow, false block, ошибки и изменчивость результатов;

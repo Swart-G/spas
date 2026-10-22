@@ -19,5 +19,12 @@ jobs:
       - run: uv run --frozen --group integration ruff check src tests scripts
       - run: uv run --frozen --group integration ruff format --check src tests scripts
       - run: uv run --frozen --group integration pytest -q -m 'not live'
+      - run: uv run --frozen python scripts/evaluation_controls.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: safety-quality-controls
+          path: executer/safety_checker/reports/quality-controls/
+          if-no-files-found: error
       - run: uv run --frozen --group integration python scripts/dev.py --smoke
       - run: docker build -t safety-analyzer:ci .

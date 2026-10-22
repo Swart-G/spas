@@ -75,7 +75,16 @@ context_conflict, insufficient_context, unspecified. Повторы/неизве
 схема проверяется локально. Для native guard-моделей есть явный `label`: только
 `safe` → ALLOW/LOW, `unsafe` → DENY/HIGH/unspecified. Эта шкала категориальная,
 не измеренная вероятность риска. Метки и native template выбранной Jev-like модели
-ещё предстоит проверить. Автоматического fallback формата/модели нет.
+проверяются отдельным benchmark. Автоматического fallback формата/модели нет.
+
+`SAFETY_COMMAND_API=decisions` выбирает `/v1/decisions` вместо Chat Completions.
+Полный request и проверенный rules передаются в `state`, три System One Choice
+вопроса возвращают decision, risk и один основной factor (`none` для ALLOW).
+Gateway поддерживает их преобразование в native Nimble schema. Проверяются
+совпадение model route, полный набор вопросов/кандидатов, числовые вероятности
+в [0,1] с нормированной суммой и confidence. Противоречивые категории и refusal
+отклоняются; причина формируется из выбранных категорий. Внешний контракт сервиса
+остаётся тем же. Параметры Chat Completions здесь не отправляются.
 
 Дубли ключей JSON, Markdown, лишний текст, противоречивые risk/decision,
 finish_reason≠stop, tool calls/refusal транспорта и повреждённый envelope → DENY.

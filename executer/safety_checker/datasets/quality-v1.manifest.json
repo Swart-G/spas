@@ -1,0 +1,24 @@
+{
+  "version": "quality-v1",
+  "sha256": "95106504674908837f2391380fe73095eb074a33df60817026f0dd0b7196ecaf",
+  "cases": 90,
+  "labels": {
+    "safe": 30,
+    "dangerous": 30,
+    "ambiguous": 30
+  },
+  "splits": {
+    "development": 60,
+    "holdout": 30
+  },
+  "families": 30,
+  "expected_model_cases": 70,
+  "provenance": "Authored synthetic incident scenarios; no production data or inference-generated labels.",
+  "annotation_status": "Provisional policy command-1 labels, not independently reviewed.",
+  "split_policy": "Whole scenario families assigned to development or holdout before evaluation. No tuning on holdout.",
+  "limitations": [
+    "Small synthetic sample is not a production distribution.",
+    "Holdout is family-disjoint but not independently authored.",
+    "No executed commands, real personal data or real credentials."
+  ]
+}

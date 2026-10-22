@@ -7,4 +7,5 @@ __pycache__/
 dist/
 build/
 reports/
+!docs/reports/
 *.egg-info/

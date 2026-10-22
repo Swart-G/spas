@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     timeout_seconds: float = Field(default=10, gt=0, le=120)
     max_tokens: int = Field(default=128, ge=16, le=1024)
     command_output_mode: Literal["json", "label"] = "json"
+    command_api: Literal["chat_completions", "decisions"] = "chat_completions"
     command_max_tokens: int = Field(default=512, ge=64, le=2048)
     command_timeout_seconds: float = Field(default=4, gt=0, le=4.5)
     rule_timeout_seconds: float = Field(default=0.5, gt=0, le=2)

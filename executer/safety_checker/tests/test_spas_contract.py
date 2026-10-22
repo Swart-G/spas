@@ -151,3 +151,80 @@ async def test_command_context_through_real_spas_gateway(tmp_path, mode):
                 )
             )
     assert result.decision == "ALLOW" and result.rules.decision == "ALLOW"
+
+
+@pytest.mark.parametrize(
+    "decision,risk,factor",
+    [
+        ("ALLOW", "LOW", "none"),
+        ("DENY", "HIGH", "secret_exposure"),
+        ("REQUIRE_APPROVAL", "MEDIUM", "insufficient_context"),
+    ],
+)
+async def test_analyzer_through_real_gateway_native_nimble_conversion(
+    tmp_path, decision, risk, factor
+):
+    calls = []
+
+    def upstream(wire):
+        body = json.loads(wire.content)
+        calls.append(body)
+        assert wire.url.path == "/v1/decisions"
+        assert body["model"] == "bespokelabs/Bespoke-Nimble-9B"
+        state = json.loads(body["context"])
+        assert state["command"] == ["pwd"] and state["context"]["task"] == "Resolve build paths"
+        assert state["rules"]["decision"] == "ALLOW"
+        selected = {"decision": decision, "risk": risk, "factor": factor}
+        return httpx.Response(
+            200,
+            json={
+                "output": selected,
+                "fields": {
+                    name: {
+                        "scores": {key: float(key == selected[name]) for key in field["choices"]}
+                    }
+                    for name, field in body["schema"].items()
+                },
+            },
+        )
+
+    config = GatewayConfig(
+        backends={
+            "nimble": BackendConfig(
+                provider="remote_inference",
+                account="test-runtime",
+                model="bespokelabs/Bespoke-Nimble-9B",
+                base_url="https://runtime.test/v1",
+            )
+        },
+        routes={"safety-default": ["nimble"]},
+        fallback_on=[],
+    )
+    async with httpx.AsyncClient(trust_env=False) as auth_client:
+        await AuthManager(CredentialStore(tmp_path), auth_client).save_remote_key(
+            "test-runtime", ""
+        )
+    app = create_app(
+        config,
+        state_dir=tmp_path,
+        keys=GatewayKeys("c" * 32),
+        transport=httpx.MockTransport(upstream),
+    )
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), trust_env=False) as client:
+            settings = Settings(
+                gateway_base_url="http://gateway.test/v1",
+                gateway_api_key="c" * 32,
+                model="safety-default",
+                command_api="decisions",
+            )
+            analyzer = CommandAnalyzer(LLMGateway(settings, client), configured_rules(settings))
+            result = await analyzer.analyze(
+                CommandAnalysisRequest(
+                    command=["pwd"],
+                    context=CommandContext(
+                        incident_id="native", reason="inspect", task="Resolve build paths"
+                    ),
+                )
+            )
+    assert result.status == "ok" and result.decision == decision and len(calls) == 1
