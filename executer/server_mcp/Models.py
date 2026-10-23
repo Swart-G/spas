@@ -81,3 +81,24 @@ class ExecutionResult(BaseModel):
         default=None,
         description="Executor request identifier for finding related server log events.",
     )
+
+
+ServiceName = Annotated[
+    str,
+    StringConstraints(strict=True, pattern=r"^[a-z0-9][a-z0-9_.-]{0,63}$"),
+]
+
+
+class DiagnosticResult(BaseModel):
+    """Одинаковый ответ всех инструментов диагностики."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["succeeded", "error", "denied"]
+    kind: Literal["logs", "state", "availability"]
+    service: ServiceName
+    output: str = ""
+    truncated: bool = False
+    observed_at: float | None = None
+    error: str | None = None
+    request_id: str | None = None

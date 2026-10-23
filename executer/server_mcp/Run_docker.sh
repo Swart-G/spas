@@ -18,6 +18,44 @@ if [[ -n "${EXECUTOR_INPUTS_DIR:-}" ]]; then
     inputs=$(realpath -- "$EXECUTOR_INPUTS_DIR")
     [[ -d "$inputs" && "$inputs" != *','* ]] || { printf 'Invalid input directory\n' >&2; exit 2; }
     mounts+=(--mount "type=bind,src=$inputs,dst=/inputs,readonly")
+    if [[ -d "$inputs/diagnostics" ]]; then
+        # The root MCP controller needs group read access to private snapshots.
+        # Command subprocesses explicitly drop all supplemental groups.
+        [[ ! -L "$inputs/diagnostics" ]] || { printf 'Invalid diagnostic directory\n' >&2; exit 2; }
+        operator_uid=$(id -u)
+        root_uid=$(stat -c %u -- /)
+        ancestor=$(dirname -- "$inputs")
+        while :; do
+            ancestor_uid=$(stat -c %u -- "$ancestor")
+            ancestor_mode=$(stat -c %a -- "$ancestor")
+            [[ "$ancestor_mode" =~ ^[0-7]+$ && ( "$ancestor_uid" == "$operator_uid" || "$ancestor_uid" == "$root_uid" ) ]] || {
+                printf 'Unsafe diagnostic ancestor ownership\n' >&2; exit 2;
+            }
+            if (( (8#$ancestor_mode & 022) != 0 )); then
+                (( ancestor_uid == root_uid && (8#$ancestor_mode & 01000) != 0 )) || {
+                    printf 'Unsafe writable diagnostic ancestor\n' >&2; exit 2;
+                }
+            fi
+            [[ "$ancestor" == / ]] && break
+            ancestor=$(dirname -- "$ancestor")
+        done
+        inputs_uid=$(stat -c %u -- "$inputs")
+        inputs_gid=$(stat -c %g -- "$inputs")
+        inputs_mode=$(stat -c %a -- "$inputs")
+        diagnostics_uid=$(stat -c %u -- "$inputs/diagnostics")
+        diagnostics_gid=$(stat -c %g -- "$inputs/diagnostics")
+        diagnostics_mode=$(stat -c %a -- "$inputs/diagnostics")
+        [[ "$operator_uid" != 10001 \
+            && "$inputs_uid" == "$operator_uid" && "$diagnostics_uid" == "$operator_uid" \
+            && "$inputs_gid" == "$diagnostics_gid" && "$diagnostics_gid" != 10001 \
+            && "$inputs_mode" =~ ^[0-7]+$ && "$diagnostics_mode" =~ ^[0-7]+$ ]] || {
+            printf 'Unsafe diagnostic ownership\n' >&2; exit 2;
+        }
+        (( (8#$inputs_mode & 022) == 0 && (8#$diagnostics_mode & 027) == 0 )) || {
+            printf 'Unsafe diagnostic permissions\n' >&2; exit 2;
+        }
+        mounts+=(--group-add "$diagnostics_gid")
+    fi
 fi
 
 if [[ -n "${EXECUTOR_POLICY_FILE:-}" ]]; then

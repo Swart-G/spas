@@ -87,7 +87,7 @@ command = "/bin/bash"
 args = ["/path/to/spas/executer/server_mcp/Run_docker.sh"]
 startup_timeout_sec = 30
 tool_timeout_sec = 45
-enabled_tools = ["execute_command"]
+enabled_tools = ["execute_command", "get_service_logs", "get_service_state", "check_service_availability"]
 ```
 
 На другой машине заменить абсолютный путь. Клиент должен иметь доступ к Docker.
@@ -108,10 +108,13 @@ Codex запускает локальный контейнер и общаетс
 а не команды человека. Не добавлять `-t` к Docker: TTY нарушает stdio-протокол.
 Конфигурация пользователя не меняется автоматически этими исходниками.
 
-### Доступная функция MCP
+### Доступные функции MCP
 
-Сервер публикует **один** инструмент — `execute_command(command, context)`.
-Он принимает argv и контекст, запускает проверку и возвращает результат:
+Сервер публикует `execute_command(command, context)` и три инструмента
+диагностики: `get_service_logs`, `get_service_state`,
+`check_service_availability`. Диагностические инструменты описаны в
+`SERVER_MCP.md`. `execute_command` принимает argv и контекст, запускает
+проверку и возвращает результат:
 
 ```json
 {

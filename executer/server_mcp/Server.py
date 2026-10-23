@@ -12,18 +12,20 @@ from typing import Annotated
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp_types import CallToolResult, TextContent
+from pydantic import Field
 
-from .Models import Command, ExecutionContext, ExecutionResult
+from .Models import Command, DiagnosticResult, ExecutionContext, ExecutionResult, ServiceName
 from .Runner import run_command
 from .Configuration import load_checker
 from .Execution_policy import validate_read_paths
+from .Diagnostics import diagnose_service
 from .Safety_contract import SafetyCheckerPort, SafetyDecision
 from .Logging import REQUEST_CONTEXT, setup_logging, shutdown_logging
 
 logger = logging.getLogger("executor.server")
 
 
-def tool_result(result: ExecutionResult) -> CallToolResult:
+def tool_result(result: ExecutionResult | DiagnosticResult) -> CallToolResult:
     """Единый формат обычного ответа и отказа при занятом сервере."""
     data = result.model_dump(mode="json")
     return CallToolResult(
@@ -48,16 +50,28 @@ class ExecutorMCPServer(MCPServer):
         exit_code = None
         safety_checked = False
         # Имя неизвестного инструмента тоже может содержать пользовательские данные.
-        logger.info("request_received", extra={"tool": name if name == "execute_command" else "unknown"})
+        known_tools = {"execute_command", "get_service_logs", "get_service_state", "check_service_availability"}
+        logger.info("request_received", extra={"tool": name if name in known_tools else "unknown"})
         try:
             # Весь цикл, включая async checker, имеет один слот без очереди.
             # Между locked() и acquire нет await, допускающего второй вход.
             if self._request_lock.locked():
                 logger.warning("request_busy")
-                result = tool_result(ExecutionResult(
-                    status="error", error="Executor is busy; retry after the current request finishes",
-                    request_id=request_id,
-                ))
+                diagnostic_kinds = {
+                    "get_service_logs": "logs", "get_service_state": "state",
+                    "check_service_availability": "availability",
+                }
+                if name in diagnostic_kinds:
+                    result = tool_result(DiagnosticResult(
+                        status="error", kind=diagnostic_kinds[name],
+                        service="unknown", request_id=request_id,
+                        error="Executor is busy; retry after the current request finishes",
+                    ))
+                else:
+                    result = tool_result(ExecutionResult(
+                        status="error", error="Executor is busy; retry after the current request finishes",
+                        request_id=request_id,
+                    ))
             else:
                 async with self._request_lock:
                     result = await super().call_tool(name, arguments, context)
@@ -79,7 +93,7 @@ class ExecutorMCPServer(MCPServer):
             # SDK/Pydantic может включать весь отвергнутый ввод в текст ошибки.
             # Не возвращаем его в контекст модели или ручной stderr-журнал.
             raise ToolError(
-                f"Invalid tool or arguments: expected command argv and incident_id/reason context; request_id={request_id}"
+                f"Invalid tool or arguments; request_id={request_id}"
             ) from None
         except Exception:
             logger.error("request_failed", exc_info=True)
@@ -170,6 +184,38 @@ def create_server(
 
         result = result.model_copy(update={"request_id": request_id, "safety_checked": safety_checked})
         return tool_result(result)
+
+    def diagnostic_tool(kind: str, service: str, context: ExecutionContext, lines: int = 100) -> CallToolResult:
+        request = dict(REQUEST_CONTEXT.get() or {})
+        request["incident_ref"] = hashlib.sha256(context.incident_id.encode()).hexdigest()[:16]
+        REQUEST_CONTEXT.set(request)
+        result = diagnose_service(kind, service, lines=lines)
+        return tool_result(result.model_copy(update={"request_id": request["request_id"]}))
+
+    @server.tool()
+    async def get_service_logs(
+        service: ServiceName,
+        context: ExecutionContext,
+        lines: Annotated[int, Field(strict=True, ge=1, le=200)] = 100,
+    ) -> Annotated[CallToolResult, DiagnosticResult]:
+        """Read recent bounded logs for an operator-allowlisted service snapshot."""
+        return diagnostic_tool("logs", service, context, lines)
+
+    @server.tool()
+    async def get_service_state(
+        service: ServiceName,
+        context: ExecutionContext,
+    ) -> Annotated[CallToolResult, DiagnosticResult]:
+        """Read running/stopped/unknown state from a fresh operator snapshot."""
+        return diagnostic_tool("state", service, context)
+
+    @server.tool()
+    async def check_service_availability(
+        service: ServiceName,
+        context: ExecutionContext,
+    ) -> Annotated[CallToolResult, DiagnosticResult]:
+        """Read Docker health availability from a fresh operator snapshot."""
+        return diagnostic_tool("availability", service, context)
 
     return server
 

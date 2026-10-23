@@ -47,7 +47,9 @@ async def main():
 
     async with connect() as session:
         tools = await session.list_tools()
-        assert [tool.name for tool in tools.tools] == ["execute_command"], tools
+        assert [tool.name for tool in tools.tools] == [
+            "execute_command", "get_service_logs", "get_service_state", "check_service_availability",
+        ], tools
         result = await call(session, ["pwd"])
         assert result["stdout"] == "/workspace\n" and result["safety_checked"], result
         result = await call(session, ["uname", "-s"])
@@ -88,6 +90,16 @@ async def main():
         policy = source / "policy.json"
         policy.write_text(json.dumps({"readable_paths": ["/inputs/sample.txt", "/inputs/escape", "/inputs/terminal.txt"]}))
         policy.chmod(0o444)
+        diagnostic = source / "diagnostics" / "gateway"
+        diagnostic.mkdir(parents=True)
+        (source / "diagnostics").chmod(0o750)
+        diagnostic.chmod(0o750)
+        (diagnostic / "snapshot.json").write_text(json.dumps({
+            "service": "gateway", "observed_at": time.time(), "state": "running",
+            "availability": "available", "logs": "gateway healthy\n", "logs_truncated": False,
+            "state_collected": True, "logs_collected": True,
+        }))
+        (diagnostic / "snapshot.json").chmod(0o640)
         async with connect(env={"EXECUTOR_INPUTS_DIR": directory, "EXECUTOR_POLICY_FILE": str(policy)}) as session:
             result = await call(session, ["cat", "/inputs/sample.txt"])
             assert result["stdout"] == "input-data\n", result
@@ -97,7 +109,17 @@ async def main():
             assert result["status"] == "denied", result
             result = await call(session, ["cat", "/inputs/terminal.txt"])
             assert result["stdout"] == terminal_payload, result
+            for name, expected in (
+                ("get_service_logs", "gateway healthy\n"),
+                ("get_service_state", "running"),
+                ("check_service_availability", "available"),
+            ):
+                reply = await session.call_tool(name, {"service": "gateway", "context": CONTEXT})
+                assert not reply.is_error and reply.structured_content["output"] == expected, reply
+            reply = await session.call_tool("get_service_logs", {"service": "../escape", "context": CONTEXT})
+            assert reply.is_error, reply
         print("OK: exact read scope and symlink rejection", flush=True)
+        print("OK: diagnostic MCP tools read only bounded service snapshots", flush=True)
 
         # Ручной интерфейс экранирует терминальные команды, MCP выше сохраняет данные.
         manual_env = os.environ.copy()
@@ -147,6 +169,8 @@ async def main():
             assert result["status"] == "failed" and not result["stdout"], result
             result = await python("from pathlib import Path; print(Path('/var/run/docker.sock').exists()); print(sorted(p.name for p in Path('/sys/class/net').iterdir()))")
             assert result["stdout"] == "False\n['lo']\n", result
+            result = await python("from pathlib import Path; Path('/inputs/diagnostics/gateway/snapshot.json').read_text()")
+            assert result["status"] == "failed" and not result["stdout"], result
             print("OK: workspace noexec, no Docker socket, no external network", flush=True)
 
             result = await call(session, ["printf", "%s", "$(pwd); hello world"])
