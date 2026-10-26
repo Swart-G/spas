@@ -31,7 +31,9 @@ POLL_INTERVAL_SECONDS = 30
 # Docker's full .State includes Health.Log entries with unbounded probe output.
 # Ask only for the fields used by the diagnostic tools.
 INSPECT_FORMAT = (
-    '{"Running":{{json .State.Running}},"Health":'
+    '{"Running":{{json .State.Running}},'
+    '"Paused":{{json .State.Paused}},'
+    '"Restarting":{{json .State.Restarting}},"Health":'
     '{{if .State.Health}}{"Status":{{json .State.Health.Status}}}{{else}}null{{end}}}'
 )
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -224,15 +226,25 @@ def collect_service(service: str, container: str) -> dict[str, object]:
         )
         if success:
             docker_state = json.loads(raw)
-            if not isinstance(docker_state, dict) or not isinstance(docker_state.get("Running"), bool):
+            if not isinstance(docker_state, dict) or any(
+                not isinstance(docker_state.get(flag), bool)
+                for flag in ("Running", "Paused", "Restarting")
+            ):
                 raise ValueError("Invalid Docker state")
             state_collected = True
             running = docker_state.get("Running") is True
-            state = "running" if running else "stopped"
+            paused = docker_state["Paused"]
+            restarting = docker_state["Restarting"]
+            if restarting:
+                state = "restarting"
+            elif paused:
+                state = "paused"
+            else:
+                state = "running" if running else "stopped"
             health = docker_state.get("Health") or {}
             if not isinstance(health, dict):
                 health = {}
-            if not running or health.get("Status") == "unhealthy":
+            if not running or paused or restarting or health.get("Status") == "unhealthy":
                 availability = "unavailable"
             elif health.get("Status") == "healthy":
                 availability = "available"

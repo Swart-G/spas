@@ -206,7 +206,7 @@ def create_server(
         service: ServiceName,
         context: ExecutionContext,
     ) -> Annotated[CallToolResult, DiagnosticResult]:
-        """Read running/stopped/unknown state from a fresh operator snapshot."""
+        """Read running/stopped/paused/restarting/unknown from a fresh operator snapshot."""
         return diagnostic_tool("state", service, context)
 
     @server.tool()
@@ -214,7 +214,10 @@ def create_server(
         service: ServiceName,
         context: ExecutionContext,
     ) -> Annotated[CallToolResult, DiagnosticResult]:
-        """Read Docker health availability from a fresh operator snapshot."""
+        """Read availability based on container state and health from a fresh snapshot.
+
+        Stopped, paused and restarting containers are unavailable even if health is healthy.
+        """
         return diagnostic_tool("availability", service, context)
 
     return server

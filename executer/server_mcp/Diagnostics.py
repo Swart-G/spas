@@ -26,7 +26,7 @@ class DiagnosticSnapshot(BaseModel):
 
     service: ServiceName
     observed_at: float = Field(ge=0)
-    state: Literal["running", "stopped", "unknown"]
+    state: Literal["running", "stopped", "paused", "restarting", "unknown"]
     availability: Literal["available", "unavailable", "unknown"]
     logs: str = Field(max_length=MAX_SNAPSHOT_BYTES)
     logs_truncated: bool

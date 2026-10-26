@@ -80,6 +80,18 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(reply.is_error)
         self.assertEqual(reply.structured_content["output"], "running")
 
+    async def test_paused_and_restarting_snapshots_reach_tools(self):
+        for state in ("paused", "restarting"):
+            with self.subTest(state=state):
+                self.snapshot(state=state, availability="unavailable")
+                for tool, expected in (
+                    ("get_service_state", state),
+                    ("check_service_availability", "unavailable"),
+                ):
+                    reply = await self.call(tool)
+                    self.assertFalse(reply.is_error)
+                    self.assertEqual(reply.structured_content["output"], expected)
+
     async def test_unknown_stale_and_symlink_fail_closed(self):
         result = await self.call("get_service_state")
         self.assertTrue(result.is_error)
@@ -368,7 +380,9 @@ class CollectorTests(unittest.TestCase):
                 Diagnostic_collector.load_services(config)
 
     def test_health_unknown_without_healthcheck_and_snapshot_written(self):
-        inspect = json.dumps({"Running": True, "Status": "running"}).encode()
+        inspect = json.dumps({
+            "Running": True, "Paused": False, "Restarting": False, "Health": None,
+        }).encode()
         with patch.object(Diagnostic_collector, "docker_output", side_effect=[
             (inspect, False, True), (b"log\n", False, True),
         ]) as docker:
@@ -398,7 +412,10 @@ class CollectorTests(unittest.TestCase):
         }
         full_response = json.dumps(full_state)
         self.assertGreater(len(full_response.encode()), 4096)
-        projected_response = json.dumps({"Running": True, "Health": {"Status": "healthy"}})
+        projected_response = json.dumps({
+            "Running": True, "Paused": False, "Restarting": False,
+            "Health": {"Status": "healthy"},
+        })
         original_popen = subprocess.Popen
         inspect_templates = []
 
@@ -421,8 +438,45 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(snapshot["availability"], "available")
         self.assertEqual(len(inspect_templates), 1)
         self.assertIn(".State.Running", inspect_templates[0])
+        self.assertIn(".State.Paused", inspect_templates[0])
+        self.assertIn(".State.Restarting", inspect_templates[0])
         self.assertIn(".State.Health.Status", inspect_templates[0])
         self.assertNotIn("{{json .State}}", inspect_templates[0])
+
+    def test_paused_and_restarting_override_stale_healthy_status(self):
+        cases = (
+            ({"Running": True, "Paused": True, "Restarting": False}, "paused"),
+            ({"Running": True, "Paused": False, "Restarting": True}, "restarting"),
+            ({"Running": False, "Paused": False, "Restarting": True}, "restarting"),
+        )
+        for flags, expected_state in cases:
+            with self.subTest(flags=flags), patch.object(
+                Diagnostic_collector, "docker_output", side_effect=[
+                    (json.dumps({**flags, "Health": {"Status": "healthy"}}).encode(), False, True),
+                    (b"log\n", False, True),
+                ],
+            ):
+                snapshot = Diagnostic_collector.collect_service("gateway", "spas-gateway-1")
+            self.assertTrue(snapshot["state_collected"])
+            self.assertEqual(snapshot["state"], expected_state)
+            self.assertEqual(snapshot["availability"], "unavailable")
+
+    def test_incomplete_docker_state_fails_closed(self):
+        for invalid in (
+            {"Running": True, "Paused": False},
+            {"Running": True, "Paused": "true", "Restarting": False},
+        ):
+            inspect = json.dumps({**invalid, "Health": {"Status": "healthy"}}).encode()
+            with self.subTest(invalid=invalid), patch.object(
+                Diagnostic_collector, "docker_output", side_effect=[
+                    (inspect, False, True),
+                    (b"", False, True),
+                ],
+            ):
+                snapshot = Diagnostic_collector.collect_service("gateway", "spas-gateway-1")
+            self.assertFalse(snapshot["state_collected"])
+            self.assertEqual(snapshot["state"], "unknown")
+            self.assertEqual(snapshot["availability"], "unknown")
 
     def test_collect_cycle_overlaps_first_batch(self):
         # Eight slow Docker calls should overlap. Otherwise a larger allowed
