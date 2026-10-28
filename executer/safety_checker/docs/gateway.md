@@ -3,6 +3,9 @@
 Проверенный reference commit: `d311eedf6e75d1adcbe6668101e6bc69a1ed4734`.
 Endpoints: `POST /v1/chat/completions` и `POST /v1/decisions`;
 обязательный `Authorization: Bearer <client key>`.
+Для выбранной `inception/mercury-decide:free` используйте
+[OpenRouter workflow](openrouter.md): скрипт поднимает Gateway автоматически,
+провайдерский ключ задаётся через `OPENROUTER_API_KEY`.
 Для Chat Completions:
 Запрос: логический `model`, system/user messages, `temperature=0.0`, `max_tokens=128`,
 `stream=false`, `n=1`. Только классификатор задаёт параметры; HTTP-клиент Analyzer
@@ -104,7 +107,7 @@ Router → RemoteInferenceAdapter → подменённый remote inference. �
 по commit в группе `integration`; она не входит в production-образ. Это доказывает
 совместимость транспорта/контракта, но не доступность реального inference.
 
-После выбора модели измените адаптер под native template (системный prompt не всегда
+При смене модели измените адаптер под native template (системный prompt не всегда
 подходит guard-моделям), точные метки и категории, затем запустите оценку повторно.
 Если потребуется новый формат (например, logits или специальный response schema),
 изменение SPAS должно идти вместе с обновлёнными контрактными тестами.

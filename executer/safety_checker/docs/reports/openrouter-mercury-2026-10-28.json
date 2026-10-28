@@ -1,0 +1,58 @@
+{
+  "date": "2026-10-28",
+  "timezone": "Europe/Moscow",
+  "status": "not_run",
+  "provider": "OpenRouter.ai",
+  "model": "inception/mercury-decide:free",
+  "provider_endpoint": "https://openrouter.ai/api/alpha/decisions",
+  "real_model_requests": 0,
+  "real_quality_metrics": null,
+  "real_stability_metrics": null,
+  "preflight": {
+    "started_at": "2026-10-28T20:19:22.709995+00:00",
+    "provider": "OpenRouter.ai",
+    "provider_model": "inception/mercury-decide:free",
+    "provider_endpoint": "https://openrouter.ai/api/alpha/decisions",
+    "gateway_route": "safety-mercury",
+    "gateway_revision": "d311eedf6e75d1adcbe6668101e6bc69a1ed4734",
+    "gateway_dependency_pin": "d311eedf6e75d1adcbe6668101e6bc69a1ed4734",
+    "gateway_config_sha256": "db6dfaf88a678cb317e6ab617d3213837d36d2f61f883ac72ee3780a26b22c89",
+    "model_weights_revision": null,
+    "status": "not_run",
+    "quality_metrics": null,
+    "model_interval_seconds": 3.1,
+    "blockers": [
+      "OPENROUTER_API_KEY is not configured"
+    ]
+  },
+  "network_probe": {
+    "method": "GET",
+    "url": "https://openrouter.ai/api/v1/models?output_modalities=decisions",
+    "attempts": 2,
+    "escalated_attempt_included": true,
+    "curl_exit_code": 56,
+    "stage": "managed_proxy_connect",
+    "proxy_status": 403,
+    "provider_http_status": null,
+    "result": "CONNECT tunnel failed, response 403"
+  },
+  "validation": {
+    "pytest": {
+      "passed": 435,
+      "skipped": 2,
+      "skip_reason": "real model not opted in"
+    },
+    "openrouter_contract_tests": 9,
+    "inference_in_contract_tests": "mocked",
+    "ruff_check": "passed",
+    "ruff_format": "passed",
+    "model_fallback": false,
+    "candidate_commands_executed": false,
+    "credential_cleanup": "verified after success and provider access failure",
+    "model_pacing": "outside Analyzer deadline; verified with virtual time"
+  },
+  "dataset_sha256": "95106504674908837f2391380fe73095eb074a33df60817026f0dd0b7196ecaf",
+  "runner_sha256": "6c2a69c3852be1a2c71bdaaf4ea8f0c4cb92be73cb1f1991895308887ed067d9",
+  "implementation_sha256": "89fc31dd5bf10b9fa16ef9c7767a94c37de2f2ad5ae2ee846a04adcc44f3919d",
+  "required_action": "Configure OPENROUTER_API_KEY restricted to openrouter.ai; save and publish the environment settings to apply credential/egress changes. Then run scripts/evaluate_openrouter.py."
+}

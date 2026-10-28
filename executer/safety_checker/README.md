@@ -2,8 +2,8 @@
 
 Модуль анализа argv и полного предоставленного контекста для СПАС. Обязательный
 Rule-Based Checker выполняется перед LLM; запреты и запросы подтверждения модель
-переопределить не может. Пока модель не выбрана, используется явная локальная
-заглушка; качество реальной модели ещё не измерялось.
+переопределить не может. Выбрана `inception/mercury-decide:free` через OpenRouter.ai.
+Для локальной разработки есть заглушка; качество реальной модели ещё не измерялось.
 
 Рабочий контракт команд: **2.0 / command-1**, [описание](docs/contracts.md).
 [Интеграция с Executor MCP](docs/executor.md) включает host-side `CheckedExecutor`,
@@ -15,7 +15,7 @@ Rule-Based Checker выполняется перед LLM; запреты и за
 опциональные live-тесты, оценка стабильности/false allow и контейнеризация.
 
 Совместимость проверяется с [SPAS Gateway](https://github.com/Swart-G/spas/tree/d311eedf6e75d1adcbe6668101e6bc69a1ed4734)
-через его настоящий HTTP API и `RemoteInferenceAdapter` с подменённым inference.
+через его настоящий HTTP API и RemoteInference/OpenAI-compatible адаптеры с подменённым inference.
 Gateway уже поддерживает текст; изменений в SPAS для текущего контракта не требуется.
 Адаптер не запрашивает неподдерживаемый `json_schema`.
 
@@ -116,7 +116,13 @@ uv run --frozen python scripts/evaluation_controls.py
 SAFETY_RUN_LIVE=1 uv run --frozen pytest -q -m live
 ```
 
-Nimble из SPAS использует `SAFETY_COMMAND_API=decisions`; см. [настройку модели](docs/models.md).
+Выбрана `inception/mercury-decide:free` через OpenRouter и `decisions` API:
+[подключение и запуск](docs/openrouter.md). После настройки `OPENROUTER_API_KEY`:
+
+```bash
+uv run --frozen --group integration python scripts/evaluate_openrouter.py
+```
+
 Offline-тесты не доказывают устойчивость решений модели. Live-тест пропускается
 без явного включения и запрещает маршрут `stub`.
 Отчёт содержит отдельные false allow, false block, ошибки и изменчивость результатов;
@@ -149,12 +155,13 @@ python scripts/build_cloud.py
 docker compose --profile stub up --no-build
 ```
 
-## Где адаптировать после выбора модели
+## Где адаптировать при смене модели
 
-1. Уточнить модель, native input template, точные метки и категории в `docs/models.md`.
+1. Для новой модели уточнить native input template, точные метки и категории в `docs/models.md`.
 2. Изменить `POLICY`, `payload()` и `parse_model_output()` в `gateway.py` под её контракт;
    не распознавать `safe` как подстроку и не делать автоматический fallback формата.
-3. Создать один явный маршрут Gateway на выбранный backend; проверить возможности
-   `temperature`, лимита токенов и `json_output`. Текущий адаптер требует первых двух.
+3. Создать один явный маршрут Gateway на выбранный backend. Для Chat проверить
+   temperature, лимит токенов и json_output; для Choice использовать decisions API.
 4. Согласовать метки датасета и пороги, выполнить live-прогоны; затем закрепить версию
-   модели и новую версию политики. Выбор модели и утверждение политики пока не выполнены.
+   модели и новую версию политики. Выбрана Mercury; реальная оценка и утверждение политики
+   пока не завершены.

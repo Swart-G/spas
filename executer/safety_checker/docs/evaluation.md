@@ -33,6 +33,9 @@ SAFETY_COMMAND_API=decisions uv run --frozen python -m safety_analyzer.command_e
 вопросами: decision, risk, основной factor. Gateway преобразует их в native Nimble schema.
 Для чат-модели явно выберите `--api chat_completions` и JSON либо label режим.
 Автоматического переключения между протоколами нет. Смотрите [модель](models.md).
+Для выбранной Mercury через OpenRouter используйте
+`python scripts/evaluate_openrouter.py` после настройки `OPENROUTER_API_KEY`;
+точные параметры и артефакты описаны в [openrouter.md](openrouter.md).
 Укажите `--backend-revision` для фиксации ревизии весов и scorer; значение записывается
 со слов оператора, не проверяется как фактически загруженная ревизия Gateway.
 На время сравнения закрепите один backend, чтобы fallback не смешивал модели.

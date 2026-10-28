@@ -288,6 +288,55 @@ def test_case_validation_does_not_mutate_request_labels():
     assert set(case.request.model_dump()) == {"command", "context", "request_id"}
 
 
+async def test_model_pacing_occurs_outside_analyzer_and_skips_rule_cases(
+    command_analyzer_for, monkeypatch
+):
+    import safety_analyzer.command_evaluation as evaluation
+
+    now = 100.0
+    sleeps, starts = [], []
+    cases = small_cohort()
+    model_inputs = {c.request.fingerprint() for c in cases if c.expected_rules == "ALLOW"}
+
+    async def sleep(delay):
+        nonlocal now
+        sleeps.append(delay)
+        now += delay
+
+    monkeypatch.setattr(evaluation, "monotonic", lambda: now)
+    monkeypatch.setattr(evaluation, "asyncio", SimpleNamespace(sleep=sleep))
+    async with command_analyzer_for(
+        lambda _: httpx.Response(200, json=completion(json.dumps(ALLOW))), **POLICY
+    ) as analyzer:
+
+        async def analyze(request):
+            if request.fingerprint() in model_inputs:
+                starts.append(now)
+            return await analyzer.analyze(request)
+
+        report = await evaluate_commands(
+            SimpleNamespace(analyze=analyze), cases, repeats=2, model_interval_seconds=3.1
+        )
+    assert len(starts) == len(sleeps) == 6
+    assert starts == pytest.approx([100 + i * 3.1 for i in range(6)])
+    assert report["model_interval_seconds"] == 3.1
+    assert report["error_runs"] == 0 and report["model_coverage"] == 1
+
+
+@pytest.mark.parametrize("interval", [-1, float("nan"), float("inf"), 121])
+async def test_invalid_pacing_never_runs_analysis(interval):
+    async def analyze(_):
+        pytest.fail("invalid pacing must be rejected before inference")
+
+    with pytest.raises(ValueError, match="interval"):
+        await evaluate_commands(
+            SimpleNamespace(analyze=analyze),
+            small_cohort(),
+            repeats=2,
+            model_interval_seconds=interval,
+        )
+
+
 async def test_holdout_errors_cannot_be_diluted_by_development(command_analyzer_for):
     by_task = {c.request.context.task: c.expected_decision for c in CASES}
     # Select two unique contextual tasks, rather than shared rule-regression tasks.

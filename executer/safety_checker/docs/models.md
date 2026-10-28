@@ -1,5 +1,14 @@
 # Выбор Jev-like модели
 
+Текущий выбор — **inception/mercury-decide:free через OpenRouter.ai**.
+Analyzer использует `SAFETY_COMMAND_API=decisions` и System One Choice.
+Для локального Gateway подготовлен [автоматический запуск](openrouter.md);
+нужен `OPENROUTER_API_KEY` и доступ к `openrouter.ai`, GPU здесь не требуется.
+Факт выбора модели не считается успешным inference: состояние реального прогона
+и причины блокировки фиксируются в отдельном [отчёте](reports/openrouter-mercury-2026-10-28.md).
+
+## Альтернативный локальный scorer Nimble
+
 В SPAS уже реализован scorer **bespokelabs/Bespoke-Nimble-9B**:
 [описание Gateway](../../../llm/LLM.md#модели-решений-jev-like-nimble),
 [реализация](../../../llm/gateway/colab/nimble_runtime.py).

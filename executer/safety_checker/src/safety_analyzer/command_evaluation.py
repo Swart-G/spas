@@ -7,6 +7,7 @@ import json
 import random
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from typing import Literal
 
 import httpx
@@ -135,27 +136,41 @@ def command_gate(report: dict, **thresholds) -> bool:
 
 
 async def evaluate_commands(
-    analyzer: CommandAnalyzer, cases: list[CommandCase], repeats=3, *, seed: int = 0
+    analyzer: CommandAnalyzer,
+    cases: list[CommandCase],
+    repeats=3,
+    *,
+    seed: int = 0,
+    model_interval_seconds: float = 0,
 ) -> dict:
     if repeats < 2 or not cases or len({c.id for c in cases}) != len(cases):
         raise ValueError("unique cases and at least two repetitions are required")
     cases = [CommandCase.model_validate_json(c.model_dump_json()) for c in cases]
     if len({c.request.fingerprint() for c in cases}) != len(cases):
         raise ValueError("duplicate command/context snapshots")
+    if not 0 <= model_interval_seconds <= 120:
+        raise ValueError("model interval must be finite and between zero and 120 seconds")
     outputs = {c.id: [] for c in cases}
     rng = random.Random(seed)
+    next_model_start = 0.0
     for _ in range(repeats):
         order = list(cases)
         rng.shuffle(order)
         for case in order:
+            # Scheduling labels never enter the model payload or authorize execution.
+            # Sleep outside Analyzer's deadline; actual rules still run on every attempt.
+            if case.expected_rules == "ALLOW":
+                await asyncio.sleep(max(0, next_model_start - monotonic()))
+                next_model_start = monotonic() + model_interval_seconds
             outputs[case.id].append(await analyzer.analyze(case.request))
     return summarize_commands(cases, outputs, repeats) | {
         "seed": seed,
         "run_order": "shuffled_full_passes",
+        "model_interval_seconds": model_interval_seconds,
     }
 
 
-async def run(args: argparse.Namespace) -> int:
+async def run(args: argparse.Namespace, *, settings: Settings | None = None) -> int:
     if args.control:
         settings = Settings(
             gateway_base_url="https://control.invalid/v1",
@@ -165,7 +180,7 @@ async def run(args: argparse.Namespace) -> int:
             command_api=args.api or "chat_completions",
         )
     else:
-        settings = Settings()
+        settings = settings or Settings()
         if args.api:
             settings = Settings(**(settings.model_dump() | {"command_api": args.api}))
     if args.policy_file:
@@ -190,6 +205,7 @@ async def run(args: argparse.Namespace) -> int:
             cases,
             args.repeats,
             seed=args.seed,
+            model_interval_seconds=args.model_interval_seconds,
         )
     thresholds = {
         key: getattr(args, key)
@@ -273,6 +289,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, default=Path("reports/command-evaluation.json"))
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--model-interval-seconds", type=float, default=0)
     parser.add_argument("--markdown", type=Path)
     parser.add_argument("--control", choices=PROFILES)
     parser.add_argument("--api", choices=("chat_completions", "decisions"))
@@ -293,6 +310,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.repeats < 2:
         parser.error("--repeats must be at least two")
+    if not 0 <= args.model_interval_seconds <= 120:
+        parser.error("--model-interval-seconds must be finite and between zero and 120")
     try:
         code = asyncio.run(run(args))
     except (ValueError, OSError):

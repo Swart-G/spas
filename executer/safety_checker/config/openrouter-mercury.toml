@@ -1,0 +1,15 @@
+# API key is supplied via OPENROUTER_API_KEY, never stored in this file.
+# No fallback to a paid or different model during evaluation.
+fallback_on = []
+
+[backends.mercury]
+provider = "openai_compatible"
+account = "safety-openrouter"
+model = "inception/mercury-decide:free"
+base_url = "https://openrouter.ai/api/alpha/decisions"
+api_format = "decisions"
+timeout_seconds = 4
+max_concurrency = 1
+
+[routes]
+safety-mercury = ["mercury"]
