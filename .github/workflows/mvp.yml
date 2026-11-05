@@ -1,0 +1,28 @@
+name: MVP integration
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.9'
+      - run: uv sync --locked --extra dev --extra colab --extra claude
+      - run: uv run --no-sync pytest -q
+      - run: docker build -f executer/server_mcp/Dockerfile -t spas-executor:local .
+      - run: uv run --no-sync python -m executer.server_mcp.Smoke_test
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp config/mvp.env.example .env.mvp
+      - run: docker compose --env-file .env.mvp -f compose.mvp.yaml up --build -d --wait
+      - run: python3 -m apps.mvp.demo
+      - if: always()
+        run: docker compose --env-file .env.mvp -f compose.mvp.yaml logs --no-color
+      - if: always()
+        run: docker compose --env-file .env.mvp -f compose.mvp.yaml down -v

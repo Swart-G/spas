@@ -1,3 +1,69 @@
+# СПАС: интеграционный MVP
+
+Рабочая ветка: `integration/mvp`. Полный цикл проходит через Orchestrator,
+Diagnostic, Worker/Planner и Executor MCP до повторной Verification.
+Инфраструктурное действие **явно симулируется** внутри Executor: это безопасная
+демонстрация взаимодействия сервисов, а не управление Docker или хостом.
+
+## Первый запуск
+
+Нужны Docker Engine с Compose v2 и Python 3 для команды демонстрации.
+Из одного checkout:
+
+```bash
+cp config/mvp.env.example .env.mvp
+# Замените четыре demo-токена в .env.mvp на разные случайные значения.
+docker compose --env-file .env.mvp -f compose.mvp.yaml up --build -d --wait
+python3 -m apps.mvp.demo
+```
+
+Ожидается JSON: `status: resolved`, четыре этапа в `history`, отдельные
+`remediation_plan` и `execution_results`, `verification.resolved: true`.
+Первый запуск исправляет симулированный сбой. Последующие инциденты увидят уже
+здоровый сервис и выполнят Verification без изменения состояния.
+
+API доступен только на `http://127.0.0.1:8010`: `POST /incidents` с `{}` создаёт
+инцидент, `POST /incidents/{id}/process` обрабатывает его, `GET /incidents/{id}`
+показывает результат. Повторная обработка завершённого ID ничего не исполняет.
+
+```bash
+# Диагностика запуска:
+docker compose --env-file .env.mvp -f compose.mvp.yaml ps
+docker compose --env-file .env.mvp -f compose.mvp.yaml logs --tail=100
+# Остановка (Gateway credentials сохраняются в volume):
+docker compose --env-file .env.mvp -f compose.mvp.yaml down
+# Следующий up создаст новый симулированный сбой и новые журналы попыток.
+```
+
+По умолчанию используется явно обозначенный `StubPlanner`, без секретов и LLM.
+Gateway запускается в том же Compose. Для LLM-планирования настройте провайдера
+через `docker compose --env-file .env.mvp -f compose.mvp.yaml exec gateway spas-llm`
+(команды приведены ниже), затем задайте `PLANNER_MODE=gateway`, `GATEWAY_MODEL`
+и `GATEWAY_API_KEY` в `.env.mvp` и пересоздайте Worker. Ошибки Gateway не приводят
+к исполнению. Текстовый план LLM остаётся предложением; argv задаёт доверенный runbook.
+
+## Проверка
+
+```bash
+uv sync --locked --extra dev --extra colab --extra claude
+uv run --no-sync pytest -q
+# Дополнительно: реальный subprocess Runner в защищённом контейнере
+docker build -f executer/server_mcp/Dockerfile -t spas-executor:local .
+uv run --no-sync python -m executer.server_mcp.Smoke_test
+```
+
+Включены прежние регрессии компонентов, отказы безопасности и этапов, отрицательная
+Verification, таймаут/отмена после исполнения без ответа, защита от повторов,
+а также реальный сетевой тест четырёх процессов (HTTP + MCP). CI отдельно запускает
+Compose и демонстрацию. Локальные сетевые тесты используют только loopback.
+
+[Архитектура, контракты, решения по веткам и ограничения](docs/mvp-architecture.md).
+MVP хранит состояние в памяти и рассчитан на один процесс каждого сервиса.
+Рестарт не восстанавливает незавершённые операции. Approval ещё не реализован:
+`REQUIRE_APPROVAL` блокирует действие. Docker socket не передаётся ни одному сервису.
+
+---
+
 # СПАС — система предотвращения и автоустранения сбоев
 
 Мультиагентная система для автоматического обнаружения,
