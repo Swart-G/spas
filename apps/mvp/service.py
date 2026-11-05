@@ -57,7 +57,8 @@ def create_app():
         @app.post("/process")
         async def process(message: AgentMessage, request: Request):
             if not hmac.compare_digest(
-                request.headers.get("authorization", ""), "Bearer " + agent_token
+                request.headers.get("authorization", "").encode("utf-8"),
+                ("Bearer " + agent_token).encode("utf-8"),
             ):
                 raise HTTPException(401, "Unauthorized")
             return await agent.process(message)

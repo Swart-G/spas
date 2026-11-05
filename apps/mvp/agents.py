@@ -1,5 +1,8 @@
 """Production orchestration contracts with a bounded, explicit demo runbook."""
 
+import time
+from math import isfinite
+
 from agents.worker.planner import RemediationPlan
 from executer.server_mcp.Models import DiagnosticResult, ExecutionResult
 from shared.contracts.messages import AgentMessage, AgentResult, RoleEnum, StageEnum
@@ -48,7 +51,11 @@ class DiagnosticAgent:
     async def process(self, message):
         validate(message, self.role, {StageEnum.DIAGNOSIS, StageEnum.VERIFICATION})
         observations = {}
-        for tool in ("get_service_state", "get_service_logs", "check_service_availability"):
+        for tool, expected_kind in (
+            ("get_service_state", "state"),
+            ("get_service_logs", "logs"),
+            ("check_service_availability", "availability"),
+        ):
             data = DiagnosticResult.model_validate(
                 await self.executor.call(
                     tool,
@@ -58,10 +65,25 @@ class DiagnosticAgent:
                     },
                 )
             )
-            if data.status != "succeeded" or data.service != "demo-service":
+            now = time.time()
+            if (
+                data.status != "succeeded"
+                or data.service != "demo-service"
+                or data.kind != expected_kind
+                or data.observed_at is None
+                or not isfinite(data.observed_at)
+                or not -5 <= now - data.observed_at <= 30
+            ):
                 return reply(message, {}, "Diagnostics unavailable")
             observations[data.kind] = data.output
-        healthy = observations.get("availability") == "available"
+        state = observations["state"]
+        availability = observations["availability"]
+        if (state, availability) not in {
+            ("running", "available"),
+            ("stopped", "unavailable"),
+        }:
+            return reply(message, {}, "Unsupported or inconsistent service observations")
+        healthy = availability == "available"
         if message.stage == StageEnum.VERIFICATION:
             output = {
                 "resolved": healthy,
@@ -113,7 +135,8 @@ class WorkerAgent:
                             "command": argv,
                             "context": context(message),
                         },
-                    )
+                    ),
+                    strict=True,
                 )
             except Exception:
                 results.append({"status": "unknown", "argv": argv})

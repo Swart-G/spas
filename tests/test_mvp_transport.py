@@ -68,7 +68,7 @@ def deployed(tmp_path):
         orchestrator = start(
             "orchestrator", DIAGNOSTIC_URL=diagnostic + "/process", WORKER_URL=worker + "/process"
         )
-        yield orchestrator, logs
+        yield orchestrator, logs, executor
     finally:
         for process in reversed(processes):
             process.terminate()
@@ -83,7 +83,7 @@ def deployed(tmp_path):
 
 
 def test_network_pipeline(deployed):
-    url, logs = deployed
+    url, logs, _ = deployed
     with httpx.Client(base_url=url, timeout=55, trust_env=False) as client:
         created = client.post("/incidents", json={})
         assert created.status_code == 201, created.text
@@ -100,3 +100,19 @@ def test_network_pipeline(deployed):
         assert body["execution_results"][0]["status"] == "succeeded"
         assert body["execution_results"][0]["safety_checked"]
         assert client.post(f"/incidents/{incident_id}/process").json() == body
+
+
+async def test_mcp_replay_is_blocked_over_http(deployed):
+    from apps.mvp.client import ExecutorClient
+
+    _, _, url = deployed
+    client = ExecutorClient(url + "/worker/mcp", "worker")
+    arguments = {
+        "command": ["spas-demo", "repair", "demo-service"],
+        "context": {"incident_id": "network-replay", "reason": "test"},
+    }
+    first = await client.call("execute_command", arguments)
+    replay = await client.call("execute_command", arguments)
+    assert first["status"] == "succeeded"
+    assert replay["status"] == "error"
+    assert replay["request_id"] and replay["request_id"] != first["request_id"]

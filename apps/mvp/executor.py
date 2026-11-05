@@ -70,44 +70,17 @@ def create_executor_app(diagnostic_token, worker_token, *, resource=None, checke
         if checker is not None
         else RuleBasedSafetyChecker(SafetyPolicy(demo_simulation=True, containers={"demo-service"}))
     )
+    ledger = {}
     servers = {
         role: create_server(
             checker=CheckedChain(rules),
             agent_role=role,
             runner=resource.execute,
             diagnostic_provider=resource.diagnose,
+            execution_ledger=ledger if role is AgentRole.WORKER else None,
         )
         for role in AgentRole
     }
-    # Reserve before the first await. An interrupted/lost result remains unknown:
-    # a later call cannot execute the same incident again, even with a new message ID.
-    ledger = {}
-    worker = servers[AgentRole.WORKER]
-    call_tool = worker.call_tool
-
-    async def once(name, arguments, context=None):
-        if name != "execute_command":
-            return await call_tool(name, arguments, context)
-        from executer.server_mcp.Models import ExecutionContext
-        from executer.server_mcp.Server import tool_result
-
-        parsed = ExecutionContext.model_validate(arguments.get("context", {}))
-        key = parsed.incident_id
-        if key in ledger:
-            return tool_result(
-                ExecutionResult(
-                    status="error",
-                    error="Incident execution already attempted; no automatic replay",
-                )
-            )
-        if len(ledger) >= 10000:
-            return tool_result(ExecutionResult(status="error", error="Execution ledger is full"))
-        ledger[key] = "unknown"
-        result = await call_tool(name, arguments, context)
-        ledger[key] = result.structured_content
-        return result
-
-    worker.call_tool = once
     mounted = {
         role: server.streamable_http_app(
             stateless_http=True,
@@ -137,7 +110,8 @@ def create_executor_app(diagnostic_token, worker_token, *, resource=None, checke
         role = request.url.path.split("/")[1]
         token = {"diagnostic": diagnostic_token, "worker": worker_token}.get(role)
         if token is None or not hmac.compare_digest(
-            request.headers.get("authorization", ""), "Bearer " + token
+            request.headers.get("authorization", "").encode("utf-8"),
+            ("Bearer " + token).encode("utf-8"),
         ):
             return JSONResponse({"detail": "Unauthorized"}, status_code=401)
         return await call_next(request)

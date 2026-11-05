@@ -34,7 +34,11 @@ class RemediationData(_StageData):
                 raise ValueError("Every planned action requires an execution result")
             for argv, result in zip(actions, self.execution_results, strict=True):
                 if (
-                    not argv
+                    not isinstance(argv, Sequence)
+                    or isinstance(argv, str)
+                    or not argv
+                    or any(not isinstance(arg, str) or not arg or "\x00" in arg for arg in argv)
+                    or sum(len(arg) for arg in argv) + len(argv) - 1 > 4096
                     or result.get("argv") != argv
                     or result.get("status") != "succeeded"
                     or result.get("safety_checked") is not True

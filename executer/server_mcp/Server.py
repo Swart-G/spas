@@ -130,6 +130,7 @@ def create_server(
     agent_role: AgentRole = AgentRole.DIAGNOSTIC,
     runner=None,
     diagnostic_provider=None,
+    execution_ledger: dict | None = None,
 ) -> MCPServer:
     """Создаёт MCP Executor с заданным режимом безопасности."""
     if not isinstance(agent_role, AgentRole):
@@ -163,6 +164,17 @@ def create_server(
         REQUEST_CONTEXT.set(request)
         logger.info("command_validated", extra={"command_length": sum(map(len, command)) + len(command) - 1})
         argv = tuple(command)
+        if execution_ledger is not None:
+            # Inside the validated/audited tool and before the first await.
+            # Cancelled calls retain an unknown outcome and cannot be replayed.
+            if context.incident_id in execution_ledger or len(execution_ledger) >= 10000:
+                logger.warning("execution_replay_or_capacity_rejected")
+                return tool_result(ExecutionResult(
+                    status="error", request_id=request_id,
+                    error=("Incident already attempted or execution ledger is full; "
+                           "no automatic replay"),
+                ))
+            execution_ledger[context.incident_id] = "unknown"
         safety_checked = False
         try:
             if not permits_command(agent_role, argv):
@@ -210,6 +222,8 @@ def create_server(
             result = ExecutionResult(status="error", error="Internal Executor error")
 
         result = result.model_copy(update={"request_id": request_id, "safety_checked": safety_checked})
+        if execution_ledger is not None:
+            execution_ledger[context.incident_id] = result.model_dump(mode="json")
         return tool_result(result)
 
     def diagnostic_tool(kind: str, service: str, context: ExecutionContext, lines: int = 100) -> CallToolResult:
