@@ -7,3 +7,5 @@ __pycache__
 .spas
 *.egg-info
 config/llm-gateway.toml
+
+.env.*

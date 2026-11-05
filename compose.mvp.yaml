@@ -1,0 +1,101 @@
+name: spas-mvp
+
+x-service: &service
+  image: spas-mvp:local
+  build:
+    context: .
+    dockerfile: apps/mvp/Dockerfile
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=32m"]
+  pids_limit: 128
+  mem_limit: 384m
+  cpus: 1
+  networks: [agents]
+  healthcheck:
+    test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+    interval: 5s
+    timeout: 3s
+    retries: 12
+
+services:
+  gateway-init:
+    image: spas-mvp:local
+    build:
+      context: .
+      dockerfile: apps/mvp/Dockerfile
+    command: [spas-llm, init]
+    environment:
+      SPAS_GATEWAY_STATE_DIR: /home/spas/.local/state/spas/llm
+    volumes: [gateway-state:/home/spas/.local/state/spas]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [gateway]
+  gateway:
+    <<: *service
+    command: [spas-llm, serve, --host, 0.0.0.0, --port, '8000']
+    environment:
+      SPAS_GATEWAY_STATE_DIR: /home/spas/.local/state/spas/llm
+    volumes: [gateway-state:/home/spas/.local/state/spas]
+    networks: [gateway]
+    depends_on:
+      gateway-init:
+        condition: service_completed_successfully
+  executor:
+    <<: *service
+    environment:
+      SPAS_COMPONENT: executor
+      DIAGNOSTIC_TOKEN: ${DIAGNOSTIC_TOKEN:?Set DIAGNOSTIC_TOKEN in .env.mvp}
+      WORKER_TOKEN: ${WORKER_TOKEN:?Set WORKER_TOKEN in .env.mvp}
+    networks: [execution]
+  diagnostic:
+    <<: *service
+    environment:
+      SPAS_COMPONENT: diagnostic
+      AGENT_TOKEN: ${DIAGNOSTIC_AGENT_TOKEN:?Set DIAGNOSTIC_AGENT_TOKEN}
+      DIAGNOSTIC_TOKEN: ${DIAGNOSTIC_TOKEN}
+    networks: [agents, execution]
+    depends_on:
+      executor:
+        condition: service_healthy
+  worker:
+    <<: *service
+    environment:
+      SPAS_COMPONENT: worker
+      AGENT_TOKEN: ${WORKER_AGENT_TOKEN:?Set WORKER_AGENT_TOKEN}
+      WORKER_TOKEN: ${WORKER_TOKEN}
+      PLANNER_MODE: ${PLANNER_MODE:-stub}
+      GATEWAY_URL: http://gateway:8000
+      GATEWAY_MODEL: ${GATEWAY_MODEL:-worker-default}
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY:-}
+    networks: [agents, execution, gateway]
+    depends_on:
+      executor:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+  orchestrator:
+    <<: *service
+    environment:
+      SPAS_COMPONENT: orchestrator
+      DIAGNOSTIC_AGENT_TOKEN: ${DIAGNOSTIC_AGENT_TOKEN}
+      WORKER_AGENT_TOKEN: ${WORKER_AGENT_TOKEN}
+    ports: ["127.0.0.1:8010:8000"]
+    networks: [agents, ingress]
+    depends_on:
+      diagnostic:
+        condition: service_healthy
+      worker:
+        condition: service_healthy
+
+networks:
+  ingress: {}
+  agents:
+    internal: true
+  execution:
+    internal: true
+  gateway: {}
+volumes:
+  gateway-state: {}
